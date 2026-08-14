@@ -23,10 +23,11 @@ var CONFIG = {
   CLEAR_COLS: ['P', 'Q', 'R', 'S', 'V'],
   // 데이터 시작 행 (1행: 구역 제목, 2행: 헤더)
   DATA_START_ROW: 3,
-  // 전일재고 수식: G열(중앙공급실) ← 마감재고 G열, M열(창고) ← 마감재고 J열
+  // 전일재고 수식: 날짜 탭 열 ← 마감재고 탭에서 "해당 창고명 헤더가 있는 열"
+  // (열 위치 고정이 아니라 마감재고 2행 헤더에서 창고명을 찾아 매칭 — 열 순서가 바뀌어도 안전)
   PREV_STOCK: [
-    { dailyCol: 'G', closingCol: 'G' },
-    { dailyCol: 'M', closingCol: 'J' }
+    { dailyCol: 'G', warehouse: '플란치과_부산점_13층 중앙공급실(구매팀)' },
+    { dailyCol: 'M', warehouse: '플란치과_부산점_구매팀 창고' }
   ],
   // 마감재고 탭 창고 컬럼 순서 (F~J열). 이카운트 창고명과 정확히 일치해야 함
   WAREHOUSES: [
@@ -98,7 +99,16 @@ function createTodayTab() {
     }
   }
 
-  // 3) 최신 날짜 탭 복사 → 오늘 이름으로
+  // 3) 마감재고 탭 헤더(2행)에서 창고명 → 열 위치 해석 (열 순서가 바뀌어도 안전)
+  var closingCols;
+  try {
+    closingCols = resolveClosingCols_(ss, closingName);
+  } catch (e) {
+    ui.alert(e.message);
+    return;
+  }
+
+  // 4) 최신 날짜 탭 복사 → 오늘 이름으로
   var newSheet = prevSheet.copyTo(ss).setName(todayName);
   ss.setActiveSheet(newSheet);
   ss.moveActiveSheet(prevSheet.getIndex() + 1); // 이전 날짜 탭 바로 뒤에 배치
@@ -110,23 +120,24 @@ function createTodayTab() {
   if (n > 0) {
     var itemCodes = newSheet.getRange(startRow, 4, n, 1).getValues(); // D열 품목코드
 
-    // 4) 전일재고 수식 갱신 (G, M열 → 방금 만든 마감재고 탭 참조)
+    // 5) 전일재고 수식 갱신 (창고명으로 해석한 마감재고 열 참조)
     CONFIG.PREV_STOCK.forEach(function (m) {
+      var col = closingCols[m.warehouse];
       var formulas = itemCodes.map(function (row, i) {
         if (!row[0]) return [''];
         var r = startRow + i;
-        return ["=iferror(XLOOKUP($D" + r + ",'" + closingName + "'!$A:$A,'" + closingName + "'!$" + m.closingCol + ":$" + m.closingCol + "),0)"];
+        return ["=iferror(XLOOKUP($D" + r + ",'" + closingName + "'!$A:$A,'" + closingName + "'!$" + col + ":$" + col + "),0)"];
       });
       newSheet.getRange(m.dailyCol + startRow + ':' + m.dailyCol + lastRow).setFormulas(formulas);
     });
 
-    // 5) 일일 입력칸 초기화
+    // 6) 일일 입력칸 초기화
     CONFIG.CLEAR_COLS.forEach(function (col) {
       newSheet.getRange(col + startRow + ':' + col + lastRow).clearContent();
     });
   }
 
-  // 6) 오래된 탭 숨김
+  // 7) 오래된 탭 숨김
   hideOldTabs(ss, today);
 
   ui.alert('"' + todayName + '" 탭 생성 완료.\n' +
@@ -158,6 +169,29 @@ function refetchClosingStock() {
   } catch (e) {
     ui.alert('실패: ' + e.message + '\n③ API 연결 테스트로 원인을 확인하세요.');
   }
+}
+
+/**
+ * 마감재고 탭 2행 헤더에서 PREV_STOCK의 창고명이 몇 열에 있는지 찾아
+ * {창고명: 열문자} 맵을 반환. 없으면 오류 (공백 차이는 무시하고 비교).
+ */
+function resolveClosingCols_(ss, closingName) {
+  var sheet = ss.getSheetByName(closingName);
+  if (!sheet) throw new Error('"' + closingName + '" 탭을 찾을 수 없습니다.');
+  var headers = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var map = {};
+  CONFIG.PREV_STOCK.forEach(function (m) {
+    var idx = -1;
+    for (var i = 0; i < headers.length; i++) {
+      if (normalize_(headers[i]) === normalize_(m.warehouse)) { idx = i; break; }
+    }
+    if (idx < 0) {
+      throw new Error('"' + closingName + '" 탭 헤더(2행)에서 창고 "' + m.warehouse + '"를 찾지 못했습니다.\n' +
+        '마감재고 탭의 창고명과 CONFIG.PREV_STOCK 설정을 확인하세요.');
+    }
+    map[m.warehouse] = columnLetter_(idx + 1);
+  });
+  return map;
 }
 
 /**
@@ -363,6 +397,7 @@ function findLatestDailyTab(ss, today) {
 function hideOldTabs(ss, today) {
   var cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - CONFIG.KEEP_VISIBLE_DAYS);
   ss.getSheets().forEach(function (sheet) {
+    if (sheet.isSheetHidden()) return; // 이미 숨겨진 탭은 건너뜀 (속도)
     var m = sheet.getName().match(/^(\d{1,2}\/\d{1,2})( 마감 재고)?$/);
     if (!m) return;
     var d = dateForTabName(m[1], today);
@@ -381,4 +416,15 @@ function firstOf_(obj, keys) {
 
 function normalize_(s) {
   return String(s || '').replace(/\s+/g, '').trim();
+}
+
+/** 열 번호(1-base) → 열 문자 (예: 1→A, 27→AA) */
+function columnLetter_(n) {
+  var s = '';
+  while (n > 0) {
+    var r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
