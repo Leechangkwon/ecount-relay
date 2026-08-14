@@ -114,6 +114,48 @@ def ping():
     return jsonify({'ok': True})
 
 
+# 전표 저장 API 경로 (이카운트 문서/설정에 따라 다를 수 있어 env로 교체 가능)
+SAVE_PATHS = {
+    'sale': os.environ.get('ECOUNT_SALE_PATH', 'Sale/SaveSale'),
+    'transfer': os.environ.get('ECOUNT_TRANSFER_PATH', 'InventoryMovement/SaveInventoryMovement'),
+}
+
+
+@app.route('/api/ecount/save', methods=['POST'])
+def save_slip():
+    """전표 저장 중계. body: {"kind": "sale"|"transfer", "list_key": "SaleList",
+    "rows": [{필드:값}...]}  — rows 각각이 BulkDatas가 된다. 응답은 이카운트 원본 그대로."""
+    if not _check_token():
+        return jsonify({'ok': False, 'msg': '토큰이 유효하지 않습니다.'}), 401
+
+    body = request.get_json(silent=True) or {}
+    kind = str(body.get('kind', '')).strip()
+    list_key = str(body.get('list_key', '')).strip()
+    rows = body.get('rows')
+    if kind not in SAVE_PATHS:
+        return jsonify({'ok': False, 'msg': f'kind는 {list(SAVE_PATHS)} 중 하나여야 합니다.'}), 400
+    if not list_key or not isinstance(rows, list) or not rows:
+        return jsonify({'ok': False, 'msg': 'list_key와 rows(1건 이상)가 필요합니다.'}), 400
+
+    def attempt(force_new):
+        s = _get_session(force_new)
+        url = f"https://oapi{s['zone']}.ecount.com/OAPI/V2/{SAVE_PATHS[kind]}?SESSION_ID={s['sid']}"
+        payload = {list_key: [{'BulkDatas': r} for r in rows]}
+        return _post(url, payload, timeout=60)
+
+    try:
+        try:
+            res = attempt(False)
+        except RuntimeError as e:
+            if any(k in str(e) for k in ('세션', 'SESSION', '로그인', '만료')):
+                res = attempt(True)
+            else:
+                raise
+        return jsonify({'ok': True, 'kind': kind, 'sent': len(rows), 'result': res})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 502
+
+
 @app.route('/api/ecount/inventory', methods=['POST'])
 def inventory():
     """창고별 재고현황 조회. body: {"base_date": "YYYYMMDD"}"""
