@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: ecount-relay
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app --timeout 120 --workers 1"
+    envVars:
+      - key: ECOUNT_COM_CODE
+        sync: false
+      - key: ECOUNT_USER_ID
+        sync: false
+      - key: ECOUNT_API_KEY
+        sync: false
+      - key: ECOUNT_RELAY_TOKEN
+        sync: false
