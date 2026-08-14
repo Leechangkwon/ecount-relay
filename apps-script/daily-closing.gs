@@ -23,28 +23,37 @@
 // ══════════════════════════ 설정 ══════════════════════════
 
 var CONFIG = {
-  MAIN_SHEET: '재고',
+  MAIN_SHEET: '재고',          // (구) 부산점 단일 탭 이름 — '재고_지점명' 형식도 인식
   LOG_SHEET: '일별기록',
   ITEM_SHEET: '품목 정보',
+  SETTINGS_SHEET: '설정',
+  WHLIST_SHEET: '_창고목록',
   PREVIEW_SHEET: '_전표전송',
   CHECK_SHEET: '_재고점검',
   DEBUG_SHEET: '_API디버그',
   DATA_START_ROW: 3,
 
-  // 창고 (이카운트 창고명/코드 — 재고조회 API로 검증됨)
-  WH_CENTRAL: '플란치과_부산점_13층 중앙공급실(구매팀)',
-  WH_SURGERY: '플란치과_부산점_13층 수술방',
-  WH_STORAGE: '플란치과_부산점_구매팀 창고',
+  // 기본 지점(부산점) — [설정] 탭이 없거나 지점을 못 찾을 때의 안전값 (재고조회 API로 검증됨)
+  DEFAULT_BRANCH: {
+    name: '부산점',
+    cust: '부산점',
+    emp: '33344',
+    whSurgery: '플란치과_부산점_13층 수술방',
+    whCentral: '플란치과_부산점_13층 중앙공급실(구매팀)',
+    whStorage: '플란치과_부산점_구매팀 창고'
+  },
   WH_CODES: {
     '플란치과_부산점_13층 수술방': '00041',
     '플란치과_부산점_13층 중앙공급실(구매팀)': '00032',
     '플란치과_부산점_13층 중앙공급실(보철)': '00060',
     '플란치과_부산점_13층 중앙공급실(수술)': '00068',
-    '플란치과_부산점_구매팀 창고': '00039'
+    '플란치과_부산점_구매팀 창고': '00039',
+    '플란치과_일산점_수술방': '00087',
+    '플란치과_일산점_중앙공급실(구매팀)': '00088',
+    '플란치과_일산점_구매팀 창고': '00083'
   },
 
-  SALE_CUST: '부산점',   // 판매전표 거래처코드 (검증됨)
-  EMP_CD: '33344',       // 담당자코드 (사원명 Cluade)
+  EMP_CD: '33344',       // 담당자코드 기본값 (사원명 Cluade)
   VAT_RATE: 0.1,
   SALE_LIST_KEY: 'SaleList',
   TRANSFER_LIST_KEY: 'LocationTranList',
@@ -78,8 +87,10 @@ var COL = {
   ORDER: 18,   // R 발주수량 (수식)
   MEMO: 19     // S 비고
 };
-var LOG_HEADERS = ['일자', '품목코드', '품목명', '전일중앙', '실사중앙', '판매', '부족수량',
+var LOG_HEADERS = ['일자', '지점', '품목코드', '품목명', '전일중앙', '실사중앙', '판매', '부족수량',
   '창고실재고', '수술방실재고', '환입', '구매입고', '페일', '사용량1일', '발주수량', '전표번호', '저장시각'];
+// 설정 탭 열: A지점명 B판매거래처 C담당자코드 D수술방창고 E중앙공급실창고 F보관창고
+var SETTING_HEADERS = ['지점명', '판매거래처코드', '담당자코드', '수술방(사용창고)', '중앙공급실 창고', '보관창고(대창고)'];
 
 // ══════════════════════════ 메뉴 ══════════════════════════
 
@@ -95,12 +106,213 @@ function onOpen() {
     .addItem('⓪ 새 구조 초기 구축 (최초 1회)', 'buildNewStructure')
     .addItem('⑥ 과거 날짜탭 아카이브', 'archiveOldTabs')
     .addSeparator()
+    .addSubMenu(SpreadsheetApp.getUi().createMenu('⑧ 지점 관리')
+      .addItem('설정 탭 생성/열기', 'openSettings')
+      .addItem('창고 목록 새로고침 (드롭다운 갱신)', 'refreshWarehouseList')
+      .addItem('지점 재고탭 생성', 'createBranchStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
     .addItem('⚙ API 설정', 'setupApiKeys')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('(구) 날짜탭 방식')
       .addItem('오늘 탭 생성', 'createTodayTab')
       .addItem('마감재고만 다시 받기', 'refetchClosingStock'))
     .addToUi();
+}
+
+// ══════════════════════════ ⑧ 지점 관리 ══════════════════════════
+
+/** [설정] 탭 생성(없으면) 후 열기. 부산/일산은 기본값 시드, 부평은 드롭다운으로 선택 */
+function openSettings() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.SETTINGS_SHEET, 0);
+    sheet.getRange(1, 1).setValue('지점별 설정 — 창고는 드롭다운에서 선택 (목록이 비었으면 "⑧ 지점 관리 > 창고 목록 새로고침" 실행). 재고탭 이름은 "재고_지점명" 형식으로 자동 연결됩니다.');
+    sheet.getRange(2, 1, 1, SETTING_HEADERS.length).setValues([SETTING_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(2);
+    sheet.getRange(3, 1, 3, 6).setValues([
+      ['부산점', '부산점', CONFIG.EMP_CD, CONFIG.DEFAULT_BRANCH.whSurgery, CONFIG.DEFAULT_BRANCH.whCentral, CONFIG.DEFAULT_BRANCH.whStorage],
+      ['일산점', '일산점', CONFIG.EMP_CD, '플란치과_일산점_수술방', '플란치과_일산점_중앙공급실(구매팀)', '플란치과_일산점_구매팀 창고'],
+      ['부평점', '부평점', CONFIG.EMP_CD, '', '', '']
+    ]);
+    sheet.setColumnWidths(4, 3, 280);
+    applyWhValidation_(ss, sheet);
+  }
+  sheet.showSheet();
+  ss.setActiveSheet(sheet);
+  SpreadsheetApp.getUi().alert('[설정] 탭입니다.\n· 지점 추가: 행을 추가해 지점명/거래처/창고를 입력\n· 창고 선택: D~F열 드롭다운 (목록 갱신은 "창고 목록 새로고침")\n· 판매거래처코드는 이카운트 거래처코드와 일치해야 합니다 (부산점은 검증됨)');
+}
+
+/** 이카운트에서 전체 창고 목록을 받아 [_창고목록]에 저장하고 설정 탭 드롭다운 갱신 */
+function refreshWarehouseList() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var rows = ecountFetchInventory(Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd'));
+  var wh = {};
+  rows.forEach(function (r) {
+    var cd = String(firstOf_(r, ['WH_CD']) || '').trim();
+    var des = String(firstOf_(r, ['WH_DES']) || '').trim();
+    if (cd && des) wh[des] = cd;
+  });
+  var names = Object.keys(wh).sort();
+  if (!names.length) { ui.alert('창고 목록을 받지 못했습니다.'); return; }
+
+  var sheet = ss.getSheetByName(CONFIG.WHLIST_SHEET);
+  if (sheet) sheet.clearContents();
+  else sheet = ss.insertSheet(CONFIG.WHLIST_SHEET, ss.getSheets().length);
+  sheet.getRange(1, 1, 1, 2).setValues([['창고코드', '창고명']]);
+  sheet.getRange(2, 1, names.length, 2).setValues(names.map(function (n) { return [wh[n], n]; }));
+  sheet.hideSheet();
+
+  var settings = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  if (settings) applyWhValidation_(ss, settings);
+  ui.alert('✅ 창고 ' + names.length + '개 수신 — [설정] 탭 창고 드롭다운이 갱신됐습니다.');
+}
+
+function applyWhValidation_(ss, settings) {
+  var whList = ss.getSheetByName(CONFIG.WHLIST_SHEET);
+  if (!whList || whList.getLastRow() < 2) return;
+  var range = whList.getRange(2, 2, whList.getLastRow() - 1, 1);
+  var rule = SpreadsheetApp.newDataValidation().requireValueInRange(range, true).setAllowInvalid(true).build();
+  settings.getRange(3, 4, Math.max(settings.getLastRow() - 2, 10), 3).setDataValidation(rule);
+}
+
+/** 창고명 → 창고코드 맵 ([_창고목록] 우선, 없으면 CONFIG.WH_CODES) */
+function loadWhMap_(ss) {
+  var map = {};
+  Object.keys(CONFIG.WH_CODES).forEach(function (k) { map[k] = CONFIG.WH_CODES[k]; });
+  var sheet = ss.getSheetByName(CONFIG.WHLIST_SHEET);
+  if (sheet && sheet.getLastRow() > 1) {
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues().forEach(function (r) {
+      if (r[0] && r[1]) map[String(r[1]).trim()] = String(r[0]).trim();
+    });
+  }
+  return map;
+}
+
+/** [설정] 탭의 지점 목록 읽기 → {지점명: config} */
+function getBranches_(ss) {
+  var out = {};
+  var d = CONFIG.DEFAULT_BRANCH;
+  out[d.name] = { name: d.name, cust: d.cust, emp: d.emp, whSurgery: d.whSurgery, whCentral: d.whCentral, whStorage: d.whStorage };
+  var sheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  if (sheet && sheet.getLastRow() > 2) {
+    sheet.getRange(3, 1, sheet.getLastRow() - 2, 6).getValues().forEach(function (r) {
+      var name = String(r[0] || '').trim();
+      if (!name) return;
+      out[name] = {
+        name: name, cust: String(r[1] || name).trim(), emp: String(r[2] || CONFIG.EMP_CD).trim(),
+        whSurgery: String(r[3] || '').trim(), whCentral: String(r[4] || '').trim(), whStorage: String(r[5] || '').trim()
+      };
+    });
+  }
+  return out;
+}
+
+/** 현재 활성 시트에서 지점 판별: '재고_지점명' 또는 (구) '재고'=부산점 */
+function branchFromActive_(ss) {
+  var name = ss.getActiveSheet().getName();
+  var branchName = null;
+  if (name === CONFIG.MAIN_SHEET) branchName = CONFIG.DEFAULT_BRANCH.name;
+  else if (name.indexOf('재고_') === 0) branchName = name.slice(3);
+  if (!branchName) {
+    throw new Error('지점 재고 탭([재고] 또는 [재고_지점명])을 연 상태에서 실행하세요.\n(현재 탭: ' + name + ')');
+  }
+  var b = getBranches_(ss)[branchName];
+  if (!b) throw new Error('[설정] 탭에 "' + branchName + '" 지점이 없습니다. "⑧ 지점 관리 > 설정 탭"에서 추가하세요.');
+  if (!b.whSurgery || !b.whCentral || !b.whStorage) {
+    throw new Error('"' + branchName + '" 지점의 창고가 [설정] 탭에서 선택되지 않았습니다. (수술방/중앙공급실/보관창고)');
+  }
+  b.sheet = ss.getActiveSheet();
+  return b;
+}
+
+/** 지점 재고탭 생성: 해당 지점 3창고에 재고가 있는 품목으로 시드 */
+function createBranchStockTab() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var branches = getBranches_(ss);
+  var names = Object.keys(branches);
+  var res = ui.prompt('재고탭을 만들 지점명을 입력하세요.\n등록된 지점: ' + names.join(', '), ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  var bName = res.getResponseText().trim();
+  var b = branches[bName];
+  if (!b) { ui.alert('[설정] 탭에 "' + bName + '" 지점이 없습니다.'); return; }
+  if (!b.whSurgery || !b.whCentral || !b.whStorage) { ui.alert('"' + bName + '" 지점의 창고를 [설정] 탭에서 먼저 선택하세요.'); return; }
+  var tabName = '재고_' + bName;
+  if (ss.getSheetByName(tabName)) { ui.alert('"' + tabName + '" 탭이 이미 있습니다.'); return; }
+
+  // 해당 지점 창고에 재고 있는 품목 수집
+  var rows = ecountFetchInventory(Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd'));
+  var whSet = {};
+  [b.whCentral, b.whStorage, b.whSurgery].forEach(function (w) { whSet[normalize_(w)] = true; });
+  var codes = {};
+  rows.forEach(function (r) {
+    var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
+    var wh = normalize_(String(firstOf_(r, ['WH_DES']) || ''));
+    if (cd && whSet[wh] && Number(firstOf_(r, ['BAL_QTY']) || 0)) codes[cd] = firstOf_(r, ['PROD_DES']) || '';
+  });
+  var codeList = Object.keys(codes).sort();
+  if (!codeList.length) { ui.alert('해당 지점 창고에 재고가 있는 품목이 없습니다. [설정]의 창고 선택을 확인하세요.'); return; }
+
+  var itemInfo = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) {
+    itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+      if (r[3] !== '' && r[3] != null) itemInfo[String(r[3])] = { cat: r[2], vendor: r[0], name: r[4] };
+    });
+  }
+  var data = codeList.map(function (cd) {
+    var info = itemInfo[cd] || {};
+    return [info.cat || '', info.vendor || '', cd, info.name || codes[cd], '',
+      '', '', '', '', '', '', '', '', '', '', '', '', '', ''];
+  });
+  buildStockTabFrame_(ss, tabName, data);
+  ui.alert('✅ "' + tabName + '" 생성 완료 — 품목 ' + codeList.length + '건 (지점 창고 재고 기준)\n' +
+    '· 인가량(E열)은 지점 기준에 맞게 직접 입력하세요.\n· 이 탭을 연 상태로 ①~⑤ 메뉴를 실행하면 ' + bName + ' 기준으로 동작합니다.');
+}
+
+/** 재고탭 공통 틀 생성 (헤더/수식/서식) — data: 19열 배열 */
+function buildStockTabFrame_(ss, tabName, data) {
+  var main = ss.insertSheet(tabName, 1);
+  main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 (매일 실사)', '', '', '']]);
+  main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고(자동)', '']]);
+  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주', '', '', '']]);
+  main.getRange(2, 1, 1, 19).setValues([[
+    '중분류', '거래처', '품목코드', '품목명', '인가량',
+    '전일재고\n(자동)', '오늘 실사\n입력칸', '판매\n(수식)', '부족수량\n(수식)',
+    '창고 실재고\n(자동)', '수술방 실재고\n(자동)',
+    '환입\n입력칸', '구매입고\n입력칸', '페일\n입력칸',
+    '사용량(1일)\n(자동)', '사용예정일\n입력칸', '필요수량\n(수식)', '발주수량\n(수식)', '비고'
+  ]]);
+  main.getRange(1, 1, 2, 19).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle');
+  main.setFrozenRows(2);
+  main.setFrozenColumns(4);
+
+  var n = data.length;
+  var startRow = CONFIG.DATA_START_ROW;
+  main.getRange(startRow, 1, n, 19).setValues(data);
+
+  var fSale = [], fNeed = [], fReq = [], fOrder = [];
+  for (var i = 0; i < n; i++) {
+    var r = startRow + i;
+    fSale.push(['=IF($G' + r + '="","",$F' + r + '-$G' + r + ')']);
+    fNeed.push(['=IF($G' + r + '="","",MAX(0,N($E' + r + ')-$G' + r + '))']);
+    fReq.push(['=IF(OR($O' + r + '="",$P' + r + '=""),"",$O' + r + '*$P' + r + ')']);
+    fOrder.push(['=IF($Q' + r + '="","",MAX(0,ROUNDDOWN(($Q' + r + '-N($G' + r + ')-N($J' + r + '))/' + CONFIG.ORDER_ROUND_UNIT + ',0)*' + CONFIG.ORDER_ROUND_UNIT + '))']);
+  }
+  main.getRange(startRow, COL.SALE, n, 1).setFormulas(fSale);
+  main.getRange(startRow, COL.NEED, n, 1).setFormulas(fNeed);
+  main.getRange(startRow, COL.REQ, n, 1).setFormulas(fReq);
+  main.getRange(startRow, COL.ORDER, n, 1).setFormulas(fOrder);
+
+  var yellow = '#fff9c4', gray = '#f0f0f0';
+  [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS].forEach(function (c) {
+    main.getRange(startRow, c, n, 1).setBackground(yellow);
+  });
+  [COL.PREV, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
+    main.getRange(startRow, c, n, 1).setBackground(gray);
+  });
+  return main;
 }
 
 // ══════════════════════════ ⓪ 새 구조 초기 구축 ══════════════════════════
@@ -121,22 +333,6 @@ function buildNewStructure() {
   var srcLast = src.getLastRow();
   var srcData = src.getRange(3, 1, srcLast - 2, 28).getValues(); // A~AB
 
-  var main = ss.insertSheet(CONFIG.MAIN_SHEET, 1);
-  // 1행 구역 제목 / 2행 헤더
-  main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 (매일 실사)', '', '', '']]);
-  main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고(자동)', '']]);
-  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주', '', '', '']]);
-  main.getRange(2, 1, 1, 19).setValues([[
-    '중분류', '거래처', '품목코드', '품목명', '인가량',
-    '전일재고\n(자동)', '오늘 실사\n입력칸', '판매\n(수식)', '부족수량\n(수식)',
-    '창고 실재고\n(자동)', '수술방 실재고\n(자동)',
-    '환입\n입력칸', '구매입고\n입력칸', '페일\n입력칸',
-    '사용량(1일)\n(자동)', '사용예정일\n입력칸', '필요수량\n(수식)', '발주수량\n(수식)', '비고'
-  ]]);
-  main.getRange(1, 1, 2, 19).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle');
-  main.setFrozenRows(2);
-  main.setFrozenColumns(4);
-
   var rows = [];
   srcData.forEach(function (r) {
     if (!r[3]) return; // D 품목코드 없는 행 제외
@@ -144,31 +340,7 @@ function buildNewStructure() {
       '', '', '', '', '', '', '', '', '', '', r[27] || '', '', '', '']);
   });
   var n = rows.length;
-  var startRow = CONFIG.DATA_START_ROW;
-  main.getRange(startRow, 1, n, 19).setValues(rows);
-
-  // 수식 세팅 (H 판매, I 부족수량, Q 필요수량, R 발주수량)
-  var fSale = [], fNeed = [], fReq = [], fOrder = [];
-  for (var i = 0; i < n; i++) {
-    var r = startRow + i;
-    fSale.push(['=IF($G' + r + '="","",$F' + r + '-$G' + r + ')']);
-    fNeed.push(['=IF($G' + r + '="","",MAX(0,N($E' + r + ')-$G' + r + '))']);
-    fReq.push(['=IF(OR($O' + r + '="",$P' + r + '=""),"",$O' + r + '*$P' + r + ')']);
-    fOrder.push(['=IF($Q' + r + '="","",MAX(0,ROUNDDOWN(($Q' + r + '-N($G' + r + ')-N($J' + r + '))/' + CONFIG.ORDER_ROUND_UNIT + ',0)*' + CONFIG.ORDER_ROUND_UNIT + '))']);
-  }
-  main.getRange(startRow, COL.SALE, n, 1).setFormulas(fSale);
-  main.getRange(startRow, COL.NEED, n, 1).setFormulas(fNeed);
-  main.getRange(startRow, COL.REQ, n, 1).setFormulas(fReq);
-  main.getRange(startRow, COL.ORDER, n, 1).setFormulas(fOrder);
-
-  // 입력칸 배경색 (연노랑) / 자동칸 (연회색)
-  var yellow = '#fff9c4', gray = '#f0f0f0';
-  [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS].forEach(function (c) {
-    main.getRange(startRow, c, n, 1).setBackground(yellow);
-  });
-  [COL.PREV, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
-    main.getRange(startRow, c, n, 1).setBackground(gray);
-  });
+  buildStockTabFrame_(ss, CONFIG.MAIN_SHEET, rows);
 
   // 일별기록 탭
   if (!ss.getSheetByName(CONFIG.LOG_SHEET)) {
@@ -188,25 +360,14 @@ function buildNewStructure() {
 function morningPrep() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var main = ss.getSheetByName(CONFIG.MAIN_SHEET);
-  if (!main) { ui.alert('[재고] 탭이 없습니다. "⓪ 새 구조 초기 구축"을 먼저 실행하세요.'); return; }
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
 
   var today = new Date();
   var prevDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
   var rows = ecountFetchInventory(Utilities.formatDate(prevDate, 'Asia/Seoul', 'yyyyMMdd'));
-
-  // 품목코드 → [중앙, 창고, 수술방]
-  var bal = {};
-  rows.forEach(function (r) {
-    var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
-    var wh = String(firstOf_(r, ['WH_DES']) || '').trim();
-    var qty = Number(firstOf_(r, ['BAL_QTY']) || 0);
-    if (!cd || !qty) return;
-    var slot = wh === CONFIG.WH_CENTRAL ? 0 : wh === CONFIG.WH_STORAGE ? 1 : wh === CONFIG.WH_SURGERY ? 2 : -1;
-    if (slot < 0) return;
-    if (!bal[cd]) bal[cd] = [0, 0, 0];
-    bal[cd][slot] += qty;
-  });
+  var bal = pivotBalance_(rows, b);
 
   var startRow = CONFIG.DATA_START_ROW;
   var lastRow = main.getLastRow();
@@ -214,8 +375,8 @@ function morningPrep() {
   if (n <= 0) { ui.alert('[재고] 탭에 품목이 없습니다.'); return; }
   var codes = main.getRange(startRow, COL.CODE, n, 1).getValues();
 
-  // 사용량(1일): 일별기록 최근 USAGE_WINDOW_DAYS일 판매 합계 ÷ 실사일수
-  var usage = computeUsage_(ss);
+  // 사용량(1일): 일별기록 최근 USAGE_WINDOW_DAYS일 판매 합계 ÷ 실사일수 (해당 지점 기록만)
+  var usage = computeUsage_(ss, b.name);
 
   var prevVals = [], storVals = [], surgVals = [], usageVals = [];
   codes.forEach(function (row) {
@@ -236,29 +397,52 @@ function morningPrep() {
     main.getRange(startRow, c, n, 1).clearContent();
   });
 
-  ui.alert('✅ 아침 준비 완료 (기준일: ' + Utilities.formatDate(prevDate, 'Asia/Seoul', 'M/d') + ' 마감)\n' +
+  ui.alert('✅ [' + b.name + '] 아침 준비 완료 (기준일: ' + Utilities.formatDate(prevDate, 'Asia/Seoul', 'M/d') + ' 마감)\n' +
     '· 전일 중앙재고 / 창고·수술방 실재고 자동 입력\n' +
     '· 실사·환입·구매입고·페일 입력칸 초기화\n' +
     '· 사용량(1일): 일별기록 최근 ' + CONFIG.USAGE_WINDOW_DAYS + '일 기준 재계산\n\n' +
     '이제 중앙공급실 실사값을 G열에 입력하세요. (실사 안 한 품목은 빈칸)');
 }
 
-/** 일별기록 최근 N일에서 품목별 1일 사용량(판매 합계 ÷ 기록된 날짜 수) 계산 */
-function computeUsage_(ss) {
+/** API 응답 → 품목코드별 [중앙, 창고, 수술방] 잔고 (지점 창고 기준) */
+function pivotBalance_(rows, b) {
+  var slotMap = {};
+  slotMap[normalize_(b.whCentral)] = 0;
+  slotMap[normalize_(b.whStorage)] = 1;
+  slotMap[normalize_(b.whSurgery)] = 2;
+  var bal = {};
+  rows.forEach(function (r) {
+    var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
+    var qty = Number(firstOf_(r, ['BAL_QTY']) || 0);
+    if (!cd || !qty) return;
+    var slot = slotMap[normalize_(String(firstOf_(r, ['WH_DES']) || ''))];
+    if (slot == null) return;
+    if (!bal[cd]) bal[cd] = [0, 0, 0];
+    bal[cd][slot] += qty;
+  });
+  return bal;
+}
+
+/** 일별기록 최근 N일에서 품목별 1일 사용량(판매 합계 ÷ 기록된 날짜 수) 계산 — 해당 지점만 */
+function computeUsage_(ss, branchName) {
   var log = ss.getSheetByName(CONFIG.LOG_SHEET);
   var usage = {};
   if (!log || log.getLastRow() < 2) return usage;
+  var hasBranchCol = String(log.getRange(1, 2).getValue()) === '지점';
   var cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - CONFIG.USAGE_WINDOW_DAYS);
   var cutoffYmd = Utilities.formatDate(cutoff, 'Asia/Seoul', 'yyyyMMdd');
-  var data = log.getRange(2, 1, log.getLastRow() - 1, 6).getValues(); // 일자~판매
+  var data = log.getRange(2, 1, log.getLastRow() - 1, 7).getValues();
   var sum = {}, days = {};
   data.forEach(function (r) {
     var ymd = String(r[0]);
     if (ymd < cutoffYmd) return;
-    var cd = String(r[1]);
-    var sale = Number(r[5]);
-    if (!cd || isNaN(sale) || r[5] === '') return;
+    var branch = hasBranchCol ? String(r[1]) : CONFIG.DEFAULT_BRANCH.name;
+    if (branch !== branchName) return;
+    var cd = String(r[hasBranchCol ? 2 : 1]);
+    var saleVal = r[hasBranchCol ? 6 : 5];
+    var sale = Number(saleVal);
+    if (!cd || isNaN(sale) || saleVal === '') return;
     sum[cd] = (sum[cd] || 0) + sale;
     if (!days[cd]) days[cd] = {};
     days[cd][ymd] = true;
@@ -279,12 +463,13 @@ function computeUsage_(ss) {
 function makeSlipPreview() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var main = ss.getSheetByName(CONFIG.MAIN_SHEET);
-  if (!main) { ui.alert('[재고] 탭이 없습니다.'); return; }
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
 
   var today = new Date();
   var ymdToday = Utilities.formatDate(today, 'Asia/Seoul', 'yyyyMMdd');
-  var ymdPrev = lastLogDate_(ss) || Utilities.formatDate(
+  var ymdPrev = lastLogDate_(ss, b.name) || Utilities.formatDate(
     new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1), 'Asia/Seoul', 'yyyyMMdd');
   if (ymdPrev >= ymdToday) ymdPrev = Utilities.formatDate(
     new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1), 'Asia/Seoul', 'yyyyMMdd');
@@ -309,11 +494,11 @@ function makeSlipPreview() {
     var need = Number(r[COL.NEED - 1]) || 0;
     var ret = Number(r[COL.RET - 1]) || 0;
     if (sale > 0) {
-      out.push(['판매', ymdPrev, CONFIG.WH_SURGERY, '', code, name, sale, (itemInfo[code] || {}).price || 0, '대기', '']);
-      out.push(['이동', ymdPrev, CONFIG.WH_CENTRAL, CONFIG.WH_SURGERY, code, name, sale, '', '대기', '']);
+      out.push([b.name, '판매', ymdPrev, b.whSurgery, '', code, name, sale, (itemInfo[code] || {}).price || 0, '대기', '']);
+      out.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, code, name, sale, '', '대기', '']);
     }
-    if (need > 0) out.push(['이동', ymdToday, CONFIG.WH_STORAGE, CONFIG.WH_CENTRAL, code, name, need, '', '대기', '']);
-    if (ret > 0) out.push(['환입', ymdToday, CONFIG.WH_CENTRAL, CONFIG.WH_STORAGE, code, name, ret, '', '대기', '']);
+    if (need > 0) out.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, code, name, need, '', '대기', '']);
+    if (ret > 0) out.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, code, name, ret, '', '대기', '']);
   });
 
   if (!out.length) { ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return; }
@@ -323,21 +508,21 @@ function makeSlipPreview() {
   var dup = 0;
   out.forEach(function (r) {
     var key = slipKey_(r);
-    if (sentKeys[key]) { r[8] = '기전송(자동 제외)'; dup++; }
+    if (sentKeys[key]) { r[9] = '기전송(자동 제외)'; dup++; }
   });
 
   var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
   if (sheet) sheet.clearContents();
   else sheet = ss.insertSheet(CONFIG.PREVIEW_SHEET, ss.getSheets().length);
-  sheet.getRange(1, 1).setValue('전송 전 검토용 — 판매·이동(중앙→수술방)은 전일자(' + ymdPrev + '), 창고→중앙 이동·환입은 오늘(' + ymdToday + '). 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "③ 전표 전송" 실행');
-  sheet.getRange(2, 1, 1, 10).setValues([['구분', '일자', '보내는창고/판매창고', '받는창고', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']]).setFontWeight('bold');
-  sheet.getRange(3, 1, out.length, 10).setValues(out);
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 전송 전 검토용 — 판매·이동(중앙→수술방)은 전일자(' + ymdPrev + '), 창고→중앙 이동·환입은 오늘(' + ymdToday + '). 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "③ 전표 전송" 실행');
+  sheet.getRange(2, 1, 1, 11).setValues([['지점', '구분', '일자', '보내는창고/판매창고', '받는창고', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']]).setFontWeight('bold');
+  sheet.getRange(3, 1, out.length, 11).setValues(out);
   sheet.showSheet();
   ss.setActiveSheet(sheet);
 
   var cnt = { '판매': 0, '이동': 0, '환입': 0 };
-  out.forEach(function (r) { if (r[8] === '대기') cnt[r[0]]++; });
-  ui.alert('전표 초안 생성 완료 — 판매 ' + cnt['판매'] + '건, 이동 ' + cnt['이동'] + '건, 환입 ' + cnt['환입'] + '건' +
+  out.forEach(function (r) { if (r[9] === '대기') cnt[r[1]]++; });
+  ui.alert('[' + b.name + '] 전표 초안 생성 완료 — 판매 ' + cnt['판매'] + '건, 이동 ' + cnt['이동'] + '건, 환입 ' + cnt['환입'] + '건' +
     (dup ? '\n(기전송 ' + dup + '건 자동 제외)' : '') +
     '\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
 }
@@ -351,53 +536,75 @@ function sendSlips() {
   if (!sheet || sheet.getLastRow() < 3) { ui.alert('먼저 "② 마감 전표 미리보기"를 실행하세요.'); return; }
 
   var lastRow = sheet.getLastRow();
-  var rows = sheet.getRange(3, 1, lastRow - 2, 10).getValues();
+  var rows = sheet.getRange(3, 1, lastRow - 2, 11).getValues();
   var pend = [];
   rows.forEach(function (r, i) {
-    if (String(r[8]).trim() === '대기' && Number(r[6]) > 0 && r[4]) pend.push({ i: i, r: r });
+    if (String(r[9]).trim() === '대기' && Number(r[7]) > 0 && r[5]) pend.push({ i: i, r: r });
   });
   if (!pend.length) { ui.alert('전송할 "대기" 상태 행이 없습니다.'); return; }
 
   var cnt = { '판매': 0, '이동': 0, '환입': 0 };
-  pend.forEach(function (p) { cnt[p.r[0]]++; });
-  var go = ui.alert('이카운트로 전송합니다:\n· 판매 ' + cnt['판매'] + '건\n· 이동 ' + cnt['이동'] + '건\n· 환입 ' + cnt['환입'] + '건\n\n진행할까요?', ui.ButtonSet.YES_NO);
+  pend.forEach(function (p) { cnt[p.r[1]]++; });
+  var branchNames = {};
+  pend.forEach(function (p) { branchNames[p.r[0]] = 1; });
+  var go = ui.alert('이카운트로 전송합니다 (' + Object.keys(branchNames).join(', ') + '):\n· 판매 ' + cnt['판매'] + '건\n· 이동 ' + cnt['이동'] + '건\n· 환입 ' + cnt['환입'] + '건\n\n진행할까요?', ui.ButtonSet.YES_NO);
   if (go !== ui.Button.YES) return;
 
+  var branches = getBranches_(ss);
+  var whMap = loadWhMap_(ss);
+  var whCd = function (name) { return whMap[String(name).trim()] || ''; };
+  var branchOf = function (p) { return branches[p.r[0]] || CONFIG.DEFAULT_BRANCH; };
   var batches = [];
 
-  // 판매: 한 전표로 묶음 (공급가액 = 수량×단가, 부가세 = 공급가액×10%, 담당자 기록)
-  var saleRows = pend.filter(function (p) { return p.r[0] === '판매'; });
-  if (saleRows.length) {
+  // 판매: 지점별로 한 전표씩 (공급가액 = 수량×단가, 부가세 = 공급가액×10%, 담당자 기록)
+  Object.keys(branchNames).forEach(function (bName) {
+    var saleRows = pend.filter(function (p) { return p.r[1] === '판매' && p.r[0] === bName; });
+    if (!saleRows.length) return;
     batches.push({
-      kind: 'sale', listKey: CONFIG.SALE_LIST_KEY, label: '판매', rows: saleRows,
+      kind: 'sale', listKey: CONFIG.SALE_LIST_KEY, label: '판매(' + bName + ')', rows: saleRows,
       bulk: saleRows.map(function (p) {
-        var qty = Number(p.r[6]) || 0, price = Number(p.r[7]) || 0;
+        var bb = branchOf(p);
+        var qty = Number(p.r[7]) || 0, price = Number(p.r[8]) || 0;
         var supply = Math.round(qty * price);
         return {
-          IO_DATE: String(p.r[1]), UPLOAD_SER_NO: '1',
-          CUST: CONFIG.SALE_CUST, EMP_CD: CONFIG.EMP_CD, WH_CD: CONFIG.WH_CODES[p.r[2]] || '',
-          PROD_CD: String(p.r[4]), QTY: String(qty), PRICE: String(price),
+          IO_DATE: String(p.r[2]), UPLOAD_SER_NO: '1',
+          CUST: bb.cust, EMP_CD: bb.emp, WH_CD: whCd(p.r[3]),
+          PROD_CD: String(p.r[5]), QTY: String(qty), PRICE: String(price),
           SUPPLY_AMT: String(supply), VAT_AMT: String(Math.round(supply * CONFIG.VAT_RATE))
         };
       })
     });
-  }
+  });
 
-  // 이동/환입: 방향별로 같은 순번(전표 묶음)
-  var moveRows = pend.filter(function (p) { return p.r[0] !== '판매'; });
+  // 이동/환입: 지점·방향별로 같은 순번(전표 묶음)
+  var moveRows = pend.filter(function (p) { return p.r[1] !== '판매'; });
   if (moveRows.length) {
     var dirSer = {}, serial = 0;
     batches.push({
       kind: 'transfer', listKey: CONFIG.TRANSFER_LIST_KEY, label: '이동/환입', rows: moveRows,
       bulk: moveRows.map(function (p) {
-        var dir = p.r[1] + '|' + p.r[2] + '>' + p.r[3];
+        var dir = p.r[0] + '|' + p.r[2] + '|' + p.r[3] + '>' + p.r[4];
         if (!dirSer[dir]) dirSer[dir] = String(++serial);
-        var row = { IO_DATE: String(p.r[1]), UPLOAD_SER_NO: dirSer[dir], EMP_CD: CONFIG.EMP_CD, PROD_CD: String(p.r[4]), QTY: String(p.r[6]) };
-        row[CONFIG.TRANSFER_FROM_FIELD] = CONFIG.WH_CODES[p.r[2]] || '';
-        row[CONFIG.TRANSFER_TO_FIELD] = CONFIG.WH_CODES[p.r[3]] || '';
+        var row = { IO_DATE: String(p.r[2]), UPLOAD_SER_NO: dirSer[dir], EMP_CD: branchOf(p).emp, PROD_CD: String(p.r[5]), QTY: String(p.r[7]) };
+        row[CONFIG.TRANSFER_FROM_FIELD] = whCd(p.r[3]);
+        row[CONFIG.TRANSFER_TO_FIELD] = whCd(p.r[4]);
         return row;
       })
     });
+  }
+
+  // 창고코드 누락 검사 (전송 전 차단)
+  var missing = [];
+  batches.forEach(function (b2) {
+    b2.bulk.forEach(function (row, i) {
+      if (b2.kind === 'sale' && !row.WH_CD) missing.push(b2.rows[i].r[3]);
+      if (b2.kind === 'transfer' && (!row[CONFIG.TRANSFER_FROM_FIELD] || !row[CONFIG.TRANSFER_TO_FIELD])) missing.push(b2.rows[i].r[3] + '/' + b2.rows[i].r[4]);
+    });
+  });
+  if (missing.length) {
+    ui.alert('창고코드를 찾지 못한 행이 있어 중단합니다:\n' + missing.filter(function (v, i, a) { return a.indexOf(v) === i; }).join('\n') +
+      '\n\n"⑧ 지점 관리 > 창고 목록 새로고침"을 실행한 뒤 다시 시도하세요.');
+    return;
   }
 
   var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm');
@@ -418,20 +625,20 @@ function sendSlips() {
       failMsg = '오류: 이카운트 ' + d.FailCnt + '건 실패 — ' + String(detail).slice(0, 60);
     }
     b.rows.forEach(function (p) {
-      rows[p.i][8] = failMsg || okMsg;
-      rows[p.i][9] = failMsg ? '' : JSON.stringify((d || {}).SlipNos || '').slice(0, 60);
+      rows[p.i][9] = failMsg || okMsg;
+      rows[p.i][10] = failMsg ? '' : JSON.stringify((d || {}).SlipNos || '').slice(0, 60);
       if (!failMsg) sentKeys[slipKey_(p.r)] = 1;
     });
     summary.push('· ' + b.label + ': ' + (failMsg || (b.rows.length + '건 성공, 전표 ' + JSON.stringify((d || {}).SlipNos || []))));
   });
 
-  sheet.getRange(3, 9, rows.length, 2).setValues(rows.map(function (r) { return [r[8], r[9]]; }));
+  sheet.getRange(3, 10, rows.length, 2).setValues(rows.map(function (r) { return [r[9], r[10]]; }));
   putSentKeys_(sentKeys);
   ui.alert('전송 결과\n' + summary.join('\n') + '\n\n"④ 재고 재점검"으로 실재고를 확인하세요.');
 }
 
 function slipKey_(r) {
-  return [r[0], r[1], r[2], r[3], r[4], r[6]].join('|');
+  return [r[0], r[1], r[2], r[3], r[4], r[5], r[7]].join('|');
 }
 function getSentKeys_() {
   try { return JSON.parse(PropertiesService.getDocumentProperties().getProperty('SENT_KEYS') || '{}'); }
@@ -470,22 +677,13 @@ function relaySave_(kind, listKey, bulk) {
 function checkInventory() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var main = ss.getSheetByName(CONFIG.MAIN_SHEET);
-  if (!main) { ui.alert('[재고] 탭이 없습니다.'); return; }
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
 
   var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
   var apiRows = ecountFetchInventory(ymd);
-  var bal = {};
-  apiRows.forEach(function (r) {
-    var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
-    var wh = String(firstOf_(r, ['WH_DES']) || '').trim();
-    var qty = Number(firstOf_(r, ['BAL_QTY']) || 0);
-    if (!cd || !qty) return;
-    var slot = wh === CONFIG.WH_CENTRAL ? 0 : wh === CONFIG.WH_STORAGE ? 1 : wh === CONFIG.WH_SURGERY ? 2 : -1;
-    if (slot < 0) return;
-    if (!bal[cd]) bal[cd] = [0, 0, 0];
-    bal[cd][slot] += qty;
-  });
+  var bal = pivotBalance_(apiRows, b);
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
@@ -516,15 +714,15 @@ function checkInventory() {
   var sheet = ss.getSheetByName(CONFIG.CHECK_SHEET);
   if (sheet) sheet.clearContents();
   else sheet = ss.insertSheet(CONFIG.CHECK_SHEET, ss.getSheets().length);
-  sheet.getRange(1, 1).setValue('중앙공급실 재고 점검 (' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm') + ') — 기대재고 = 실사 + 창고→중앙이동 − 환입');
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 재고 점검 (' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm') + ') — 기대재고 = 실사 + 창고→중앙이동 − 환입');
   sheet.getRange(2, 1, 1, 8).setValues([['품목코드', '품목명', '실사', '이동(부족보충)', '환입', '기대재고', 'ERP 실재고', '차이']]).setFontWeight('bold');
   if (report.length) sheet.getRange(3, 1, report.length, 8).setValues(report);
   sheet.showSheet();
   ss.setActiveSheet(sheet);
 
   ui.alert(report.length
-    ? '⚠ 차이 품목 ' + report.length + '건 — "' + CONFIG.CHECK_SHEET + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
-    : '✅ 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.');
+    ? '⚠ [' + b.name + '] 차이 품목 ' + report.length + '건 — "' + CONFIG.CHECK_SHEET + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
+    : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.');
 }
 
 // ══════════════════════════ ⑤ 마감 저장 ══════════════════════════
@@ -532,31 +730,34 @@ function checkInventory() {
 function saveDailyLog() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var main = ss.getSheetByName(CONFIG.MAIN_SHEET);
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
   var log = ss.getSheetByName(CONFIG.LOG_SHEET);
-  if (!main || !log) { ui.alert('[재고]/[일별기록] 탭이 없습니다. "⓪ 새 구조 초기 구축"을 먼저 실행하세요.'); return; }
+  if (!log) { ui.alert('[일별기록] 탭이 없습니다. "⓪ 새 구조 초기 구축"을 먼저 실행하세요.'); return; }
+  migrateLogBranchCol_(log);
 
   var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
 
-  // 같은 날 중복 저장 방지 (재저장 시 기존 기록 삭제 후 저장)
+  // 같은 날+같은 지점 중복 저장 방지 (재저장 시 기존 기록 삭제 후 저장)
   var lastLog = log.getLastRow();
   if (lastLog > 1) {
-    var dates = log.getRange(2, 1, lastLog - 1, 1).getValues();
+    var keys = log.getRange(2, 1, lastLog - 1, 2).getValues(); // 일자, 지점
     var todayRows = [];
-    dates.forEach(function (r, i) { if (String(r[0]) === ymd) todayRows.push(i + 2); });
+    keys.forEach(function (r, i) { if (String(r[0]) === ymd && String(r[1]) === b.name) todayRows.push(i + 2); });
     if (todayRows.length) {
-      var go = ui.alert('오늘(' + ymd + ') 기록 ' + todayRows.length + '건이 이미 있습니다.\n삭제하고 현재 값으로 다시 저장할까요?', ui.ButtonSet.YES_NO);
+      var go = ui.alert('오늘(' + ymd + ') [' + b.name + '] 기록 ' + todayRows.length + '건이 이미 있습니다.\n삭제하고 현재 값으로 다시 저장할까요?', ui.ButtonSet.YES_NO);
       if (go !== ui.Button.YES) return;
       for (var i = todayRows.length - 1; i >= 0; i--) log.deleteRow(todayRows[i]);
     }
   }
 
-  // 오늘 전표번호 모음 (_전표전송 탭 J열)
+  // 오늘 전표번호 모음 (_전표전송 탭 K열)
   var slipNos = '';
   var prev = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
   if (prev && prev.getLastRow() > 2) {
     var uniq = {};
-    prev.getRange(3, 10, prev.getLastRow() - 2, 1).getValues().forEach(function (r) {
+    prev.getRange(3, 11, prev.getLastRow() - 2, 1).getValues().forEach(function (r) {
       if (r[0]) uniq[String(r[0])] = 1;
     });
     slipNos = Object.keys(uniq).join(' ');
@@ -571,7 +772,7 @@ function saveDailyLog() {
   data.forEach(function (r) {
     var code = r[COL.CODE - 1];
     if (!code) return;
-    out.push([ymd, code, r[COL.NAME - 1],
+    out.push([ymd, b.name, code, r[COL.NAME - 1],
       r[COL.PREV - 1], r[COL.COUNT - 1], r[COL.SALE - 1], r[COL.NEED - 1],
       r[COL.STORAGE - 1], r[COL.SURGERY - 1],
       r[COL.RET - 1], r[COL.PURCHASE - 1], r[COL.FAIL - 1],
@@ -580,18 +781,34 @@ function saveDailyLog() {
   if (!out.length) { ui.alert('저장할 데이터가 없습니다.'); return; }
   log.getRange(log.getLastRow() + 1, 1, out.length, LOG_HEADERS.length).setValues(out);
 
-  ui.alert('✅ 마감 저장 완료 — [일별기록]에 ' + out.length + '건 기록 (' + ymd + ')\n' +
-    '과거 이력은 [일별기록] 탭에서 일자/품목으로 필터해 확인하세요.');
+  ui.alert('✅ [' + b.name + '] 마감 저장 완료 — [일별기록]에 ' + out.length + '건 기록 (' + ymd + ')\n' +
+    '과거 이력은 [일별기록] 탭에서 일자/지점/품목으로 필터해 확인하세요.');
 }
 
-/** 일별기록의 마지막 저장 일자(yyyyMMdd) */
-function lastLogDate_(ss) {
+/** 일별기록에 지점 열이 없으면(B1 != '지점') 열 삽입 + 기존 기록은 부산점으로 채움 */
+function migrateLogBranchCol_(log) {
+  if (String(log.getRange(1, 2).getValue()) === '지점') return;
+  log.insertColumnAfter(1);
+  log.getRange(1, 2).setValue('지점').setFontWeight('bold');
+  var last = log.getLastRow();
+  if (last > 1) {
+    var fill = [];
+    for (var i = 0; i < last - 1; i++) fill.push([CONFIG.DEFAULT_BRANCH.name]);
+    log.getRange(2, 2, last - 1, 1).setValues(fill);
+  }
+}
+
+/** 일별기록의 마지막 저장 일자(yyyyMMdd) — 해당 지점 기준 */
+function lastLogDate_(ss, branchName) {
   var log = ss.getSheetByName(CONFIG.LOG_SHEET);
   if (!log || log.getLastRow() < 2) return null;
-  var dates = log.getRange(2, 1, log.getLastRow() - 1, 1).getValues();
+  var hasBranchCol = String(log.getRange(1, 2).getValue()) === '지점';
+  var rows = log.getRange(2, 1, log.getLastRow() - 1, 2).getValues();
   var max = null;
-  dates.forEach(function (r) {
+  rows.forEach(function (r) {
     var v = String(r[0]);
+    var branch = hasBranchCol ? String(r[1]) : CONFIG.DEFAULT_BRANCH.name;
+    if (branchName && branch !== branchName) return;
     if (/^\d{8}$/.test(v) && (!max || v > max)) max = v;
   });
   return max;
