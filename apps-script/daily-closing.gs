@@ -296,7 +296,12 @@ function buildClosingSheet(ss, baseDate, closingName) {
 
 /**
  * ③ 오늘 탭의 입력값으로 전송할 전표 초안을 '_전표전송' 탭에 생성.
- * 판매(수술방, K열) / 이동 중앙→수술방(K열) / 이동 창고→중앙(P+Q열) / 환입 중앙→창고(R열)
+ *
+ * 운영 규칙 (매일 실사 = 중앙공급실 당일재고만 카운트):
+ *  · 어제 채워둔 중앙장에서 빈 만큼(K열 판매수식) = 어제 수술방이 가져가 사용한 양
+ *    → 판매(수술방 출고) + 이동(중앙→수술방)을 **전일자**로 생성 (수량 = K열)
+ *  · 중앙장 부족 수량(O열 불출필요수량)만큼 **오늘 날짜**로 이동(창고→중앙) 생성
+ *  · 환입(R열)은 오늘 날짜로 중앙→창고 역이동
  * 수량은 미리보기 탭에서 수정 가능. 행을 지우거나 수량을 0으로 만들면 전송 제외.
  */
 function makeSlipPreview() {
@@ -306,10 +311,15 @@ function makeSlipPreview() {
   var todaySheet = ss.getSheetByName(tabNameForDate(today));
   if (!todaySheet) { ui.alert('오늘 날짜 탭("' + tabNameForDate(today) + '")이 없습니다. ① 오늘 탭 생성을 먼저 실행하세요.'); return; }
 
-  var ymd = Utilities.formatDate(today, 'Asia/Seoul', 'yyyyMMdd');
+  // 전일 = 오늘을 제외한 가장 최근 날짜 탭 (주말을 건너뛰면 그 직전 영업일)
+  var prev = findLatestDailyTab(ss, today);
+  if (!prev) { ui.alert('전일 날짜 탭을 찾지 못했습니다.'); return; }
+  var ymdToday = Utilities.formatDate(today, 'Asia/Seoul', 'yyyyMMdd');
+  var ymdPrev = Utilities.formatDate(prev.date, 'Asia/Seoul', 'yyyyMMdd');
+
   var startRow = CONFIG.DATA_START_ROW;
   var lastRow = todaySheet.getLastRow();
-  // D품목코드(4), E품목명(5), K판매(11), P불출1(16), Q불출2(17), R환입(18)
+  // D품목코드(4), E품목명(5), K판매(11), O불출필요(15), R환입(18)
   var data = todaySheet.getRange(startRow, 1, lastRow - startRow + 1, 18).getValues();
 
   var itemInfo = {};
@@ -324,21 +334,20 @@ function makeSlipPreview() {
   data.forEach(function (r) {
     var code = r[3], name = r[4];
     if (!code) return;
-    var sale = Number(r[10]) || 0;   // K 판매(수식)
-    var out1 = Number(r[15]) || 0;   // P 불출1차
-    var out2 = Number(r[16]) || 0;   // Q 불출2차
+    var sale = Number(r[10]) || 0;   // K 판매(수식) = 어제 수술방 사용분
+    var need = Number(r[14]) || 0;   // O 불출필요수량 = 중앙장 부족 수량
     var ret = Number(r[17]) || 0;    // R 환입
     if (sale > 0) {
-      rows.push(['판매', ymd, CONFIG.WH_SURGERY, '', code, name, sale, (itemInfo[code] || {}).price || 0, '대기', '']);
-      rows.push(['이동', ymd, CONFIG.WH_CENTRAL, CONFIG.WH_SURGERY, code, name, sale, '', '대기', '']);
+      rows.push(['판매', ymdPrev, CONFIG.WH_SURGERY, '', code, name, sale, (itemInfo[code] || {}).price || 0, '대기', '']);
+      rows.push(['이동', ymdPrev, CONFIG.WH_CENTRAL, CONFIG.WH_SURGERY, code, name, sale, '', '대기', '']);
     }
-    if (out1 + out2 > 0) rows.push(['이동', ymd, CONFIG.WH_STORAGE, CONFIG.WH_CENTRAL, code, name, out1 + out2, '', '대기', '']);
-    if (ret > 0) rows.push(['환입', ymd, CONFIG.WH_CENTRAL, CONFIG.WH_STORAGE, code, name, ret, '', '대기', '']);
+    if (need > 0) rows.push(['이동', ymdToday, CONFIG.WH_STORAGE, CONFIG.WH_CENTRAL, code, name, need, '', '대기', '']);
+    if (ret > 0) rows.push(['환입', ymdToday, CONFIG.WH_CENTRAL, CONFIG.WH_STORAGE, code, name, ret, '', '대기', '']);
   });
 
   var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET) || ss.insertSheet(CONFIG.PREVIEW_SHEET, ss.getSheets().length);
   sheet.clearContents();
-  sheet.getRange(1, 1).setValue('전송 전 검토용 — 수량 수정 가능. 빼려면 행 삭제 또는 수량 0. 검토 후 "④ 전표 전송" 실행');
+  sheet.getRange(1, 1).setValue('전송 전 검토용 — 판매·이동(중앙→수술방)은 전일자(' + ymdPrev + '), 창고→중앙 이동·환입은 오늘(' + ymdToday + '). 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "④ 전표 전송" 실행');
   sheet.getRange(2, 1, 1, 10).setValues([['유형', '일자', '보내는창고', '받는창고(판매는 공란)', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']]);
   if (rows.length) sheet.getRange(3, 1, rows.length, 10).setValues(rows);
   sheet.showSheet();
