@@ -61,12 +61,14 @@ var CONFIG = {
   WH_SURGERY: '플란치과_부산점_13층 수술방',
   WH_CENTRAL: '플란치과_부산점_13층 중앙공급실(구매팀)',
   WH_STORAGE: '플란치과_부산점_구매팀 창고',
-  SALE_CUST: '부산점',          // 판매전표 거래처코드 (이카운트 거래처코드와 다르면 수정)
-  // 이카운트 저장 API 필드명 (설정에 따라 다르면 여기만 수정)
+  SALE_CUST: '부산점',          // 판매전표 거래처코드 (검증됨: 전표 20260813-5 정상 생성)
+  EMP_CD: '33344',              // 담당자코드 (사원명 Cluade) — 판매·이동 전표에 기록
+  VAT_RATE: 0.1,                // 부가세율 (공급가액×10%)
+  // 이카운트 저장 API 필드명 (공식 문서 확인: 창고이동입력 = Others/SaveLocationTran)
   SALE_LIST_KEY: 'SaleList',
-  TRANSFER_LIST_KEY: 'InventoryMovementList',
-  TRANSFER_FROM_FIELD: 'FROM_WH_CD',
-  TRANSFER_TO_FIELD: 'TO_WH_CD',
+  TRANSFER_LIST_KEY: 'LocationTranList',
+  TRANSFER_FROM_FIELD: 'WH_CD_F',
+  TRANSFER_TO_FIELD: 'WH_CD_T',
   PREVIEW_SHEET: '_전표전송',
   CHECK_SHEET: '_재고점검'
 };
@@ -379,13 +381,17 @@ function sendSlips() {
   var go = ui.alert('이카운트로 전송합니다:\n· 판매 ' + cnt['판매'] + '건\n· 이동 ' + cnt['이동'] + '건\n· 환입 ' + cnt['환입'] + '건\n\n진행할까요?', ui.ButtonSet.YES_NO);
   if (go !== ui.Button.YES) return;
 
-  // 판매: 한 전표로 묶음
+  // 판매: 한 전표로 묶음 (공급가액 = 수량×단가, 부가세 = 공급가액×10%)
   var saleRows = pend.filter(function (p) { return p.r[0] === '판매'; });
   var saleBulk = saleRows.map(function (p) {
+    var qty = Number(p.r[6]) || 0, price = Number(p.r[7]) || 0;
+    var supply = Math.round(qty * price);
+    var vat = Math.round(supply * CONFIG.VAT_RATE);
     return {
       IO_DATE: String(p.r[1]), UPLOAD_SER_NO: '1',
-      CUST: CONFIG.SALE_CUST, WH_CD: CONFIG.WH_CODES[p.r[2]] || '',
-      PROD_CD: String(p.r[4]), QTY: String(p.r[6]), PRICE: String(p.r[7] || 0)
+      CUST: CONFIG.SALE_CUST, EMP_CD: CONFIG.EMP_CD, WH_CD: CONFIG.WH_CODES[p.r[2]] || '',
+      PROD_CD: String(p.r[4]), QTY: String(qty), PRICE: String(price),
+      SUPPLY_AMT: String(supply), VAT_AMT: String(vat)
     };
   });
 
@@ -395,7 +401,7 @@ function sendSlips() {
   var moveBulk = moveRows.map(function (p) {
     var dir = p.r[2] + '>' + p.r[3];
     if (!dirSer[dir]) dirSer[dir] = String(++serSeq);
-    var row = { IO_DATE: String(p.r[1]), UPLOAD_SER_NO: dirSer[dir], PROD_CD: String(p.r[4]), QTY: String(p.r[6]) };
+    var row = { IO_DATE: String(p.r[1]), UPLOAD_SER_NO: dirSer[dir], EMP_CD: CONFIG.EMP_CD, PROD_CD: String(p.r[4]), QTY: String(p.r[6]) };
     row[CONFIG.TRANSFER_FROM_FIELD] = CONFIG.WH_CODES[p.r[2]] || '';
     row[CONFIG.TRANSFER_TO_FIELD] = CONFIG.WH_CODES[p.r[3]] || '';
     return row;
@@ -410,17 +416,23 @@ function sendSlips() {
   var summary = [];
   results.forEach(function (b) {
     var okMsg = '전송완료 ' + now, failMsg = null;
-    if (!b.res.ok) failMsg = '오류: ' + String(b.res.msg).slice(0, 80);
-    else {
-      var d = (b.res.result && b.res.result.Data) || {};
-      var fail = Number(d.FailCnt || 0);
-      if (fail > 0) failMsg = '오류: 이카운트 ' + fail + '건 실패 — "' + CONFIG.DEBUG_SHEET + '" 시트 확인';
+    var result = b.res.result || {};
+    var d = result.Data;
+    if (!b.res.ok) {
+      failMsg = '오류: ' + String(b.res.msg).slice(0, 80);
+    } else if (String(result.Status || '') !== '200' || !d) {
+      // 이카운트가 전표를 만들지 않은 경우 (잘못된 경로/요청 등) — 절대 완료로 표시하지 않음
+      var errs = (result.Errors || []).map(function (e) { return e.Message; }).join('; ');
+      failMsg = '오류: Status ' + (result.Status || '?') + (errs ? ' — ' + errs : '') + ' ("' + CONFIG.DEBUG_SHEET + '" 시트 확인)';
+    } else if (Number(d.FailCnt || 0) > 0) {
+      var detail = ((d.ResultDetails || []).filter(function (x) { return x && x.IsSuccess === false; })[0] || {}).TotalError || '';
+      failMsg = '오류: 이카운트 ' + d.FailCnt + '건 실패 — ' + String(detail).slice(0, 60);
     }
     b.rows.forEach(function (p) {
       rows[p.i][8] = failMsg || okMsg;
-      rows[p.i][9] = failMsg ? '' : JSON.stringify(((b.res.result || {}).Data || {}).SlipNos || '').slice(0, 60);
+      rows[p.i][9] = failMsg ? '' : JSON.stringify((d || {}).SlipNos || '').slice(0, 60);
     });
-    summary.push('· ' + b.label + ': ' + (failMsg || (b.rows.length + '건 성공')));
+    summary.push('· ' + b.label + ': ' + (failMsg || (b.rows.length + '건 성공, 전표 ' + JSON.stringify((d || {}).SlipNos || []))));
   });
   range.setValues(rows);
 

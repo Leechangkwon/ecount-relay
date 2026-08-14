@@ -48,8 +48,14 @@ def _post(url, payload, timeout=30):
     except urllib.error.HTTPError as e:
         raise RuntimeError(f'이카운트 HTTP {e.code}: {e.read().decode("utf-8", "replace")[:300]}')
     data = json.loads(body)
+    # 이카운트는 HTTP 200이어도 Status/Errors 로 오류를 반환한다 (예: 잘못된 경로 = Status 500 Not Found)
+    status = str(data.get('Status', '200'))
+    if status != '200':
+        errs = data.get('Errors') or []
+        msg = '; '.join(f"{e.get('Code', '')}:{e.get('Message', '')}" for e in errs) or json.dumps(data, ensure_ascii=False)[:200]
+        raise RuntimeError(f'이카운트 오류 Status {status} — {msg}')
     inner = data.get('Data') or {}
-    # 이카운트는 HTTP 200이어도 Data.Code 로 오류를 반환한다 (예: 205 = IP 미등록)
+    # 로그인류 응답은 Data.Code 로 오류를 반환한다 (예: 205 = IP 미등록)
     if inner.get('Code') and str(inner.get('Code')) not in ('00', '200'):
         raise RuntimeError(f"이카운트 오류 {inner.get('Code')}: {inner.get('Message', '')}")
     return data
@@ -117,7 +123,8 @@ def ping():
 # 전표 저장 API 경로 (이카운트 문서/설정에 따라 다를 수 있어 env로 교체 가능)
 SAVE_PATHS = {
     'sale': os.environ.get('ECOUNT_SALE_PATH', 'Sale/SaveSale'),
-    'transfer': os.environ.get('ECOUNT_TRANSFER_PATH', 'InventoryMovement/SaveInventoryMovement'),
+    # 창고이동입력 공식 경로 (이카운트 OAPI 문서 '기타이동API > 창고이동입력')
+    'transfer': os.environ.get('ECOUNT_TRANSFER_PATH', 'Others/SaveLocationTran'),
 }
 
 
