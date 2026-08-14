@@ -348,6 +348,14 @@ function makeSlipPreview() {
   });
 
   var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET) || ss.insertSheet(CONFIG.PREVIEW_SHEET, ss.getSheets().length);
+
+  // 재생성 전, 기존 미리보기에서 실제 전송 성공한 행(전표번호 있음)의 키를 이력에 흡수 (중복 전송 방지)
+  harvestSentKeys_(sheet);
+  var sent = loadSentKeys_();
+  rows.forEach(function (r) {
+    if (sent[slipKey_(r)]) r[8] = '기전송(자동 제외)';
+  });
+
   sheet.clearContents();
   sheet.getRange(1, 1).setValue('전송 전 검토용 — 판매·이동(중앙→수술방)은 전일자(' + ymdPrev + '), 창고→중앙 이동·환입은 오늘(' + ymdToday + '). 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "④ 전표 전송" 실행');
   sheet.getRange(2, 1, 1, 10).setValues([['유형', '일자', '보내는창고', '받는창고(판매는 공란)', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']]);
@@ -432,6 +440,7 @@ function sendSlips() {
       rows[p.i][8] = failMsg || okMsg;
       rows[p.i][9] = failMsg ? '' : JSON.stringify((d || {}).SlipNos || '').slice(0, 60);
     });
+    if (!failMsg) recordSentKeys_(b.rows.map(function (p) { return slipKey_(p.r); }));
     summary.push('· ' + b.label + ': ' + (failMsg || (b.rows.length + '건 성공, 전표 ' + JSON.stringify((d || {}).SlipNos || []))));
   });
   range.setValues(rows);
@@ -483,6 +492,43 @@ function checkInventory() {
   ui.alert(diffs.length === 0
     ? '✅ 전 품목 일치 — 시트 계산재고와 이카운트 실재고가 같습니다.'
     : '⚠ 불일치 ' + diffs.length + '건 — "' + CONFIG.CHECK_SHEET + '" 탭에서 확인하세요.\n(전표가 방금 전송된 경우 이카운트 반영까지 잠시 걸릴 수 있습니다)');
+}
+
+// ── 전송 이력 (중복 전송 방지) ──
+// 키 = 유형|일자|보내는창고|받는창고|품목코드. Script Properties 'SENT_KEYS'에 저장, 14일 지난 키는 정리.
+
+function slipKey_(r) {
+  return [r[0], r[1], normalize_(r[2]), normalize_(r[3]), r[4]].join('|');
+}
+
+function loadSentKeys_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('SENT_KEYS') || '{}'); }
+  catch (e) { return {}; }
+}
+
+function recordSentKeys_(keys) {
+  var props = PropertiesService.getScriptProperties();
+  var sent = loadSentKeys_();
+  var today = new Date();
+  keys.forEach(function (k) { sent[k] = 1; });
+  // 14일 지난 일자 키 정리 (키의 두 번째 조각이 YYYYMMDD)
+  var cutoff = Utilities.formatDate(new Date(today.getTime() - 14 * 86400000), 'Asia/Seoul', 'yyyyMMdd');
+  Object.keys(sent).forEach(function (k) {
+    var d = k.split('|')[1];
+    if (d && d < cutoff) delete sent[k];
+  });
+  props.setProperty('SENT_KEYS', JSON.stringify(sent));
+}
+
+/** 기존 미리보기 탭에서 전송 성공 행(상태=전송완료 & 전표번호 기록됨)의 키를 이력에 흡수 */
+function harvestSentKeys_(sheet) {
+  if (!sheet || sheet.getLastRow() < 3) return;
+  var vals = sheet.getRange(3, 1, sheet.getLastRow() - 2, 10).getValues();
+  var keys = [];
+  vals.forEach(function (r) {
+    if (String(r[8]).indexOf('전송완료') === 0 && /\d/.test(String(r[9]))) keys.push(slipKey_(r));
+  });
+  if (keys.length) recordSentKeys_(keys);
 }
 
 /** 전표 저장 중계 호출. 반환: {ok, msg?, result?} (오류를 던지지 않고 객체로 반환) */
