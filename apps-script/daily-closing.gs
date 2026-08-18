@@ -2,7 +2,7 @@
  * ⚡ 데일리 재고 마감 자동화 v2 (부산점) — 단일 탭 + 일별기록 구조
  *
  * 탭 구성
- *  [재고]      : 매일 작업하는 단일 탭 (날짜 탭 복제 없음)
+ *  [재고_지점명] : 지점별 매일 작업 탭 (날짜 탭 복제 없음). 예: 재고_부산점, 재고_일산점
  *  [일별기록]  : 마감 시 전 품목 스냅샷이 한 줄씩 쌓이는 감사용 로그
  *  [품목 정보] / [_전표전송] / [_재고점검] / [_API디버그]
  *
@@ -23,7 +23,7 @@
 // ══════════════════════════ 설정 ══════════════════════════
 
 var CONFIG = {
-  MAIN_SHEET: '재고',          // (구) 부산점 단일 탭 이름 — '재고_지점명' 형식도 인식
+  MAIN_SHEET: '재고',          // (구) 부산점 탭 이름 — 발견 시 '재고_부산점'으로 자동 개명. 현재 규칙: '재고_지점명'
   LOG_SHEET: '일별기록',
   ITEM_SHEET: '품목 정보',
   SETTINGS_SHEET: '설정',
@@ -110,7 +110,8 @@ function onOpen() {
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑧ 지점 관리')
       .addItem('설정 탭 생성/열기', 'openSettings')
       .addItem('창고 목록 새로고침 (드롭다운 갱신)', 'refreshWarehouseList')
-      .addItem('지점 재고탭 생성', 'createBranchStockTab'))
+      .addItem('지점 재고탭 생성', 'createBranchStockTab')
+      .addItem('재고 탭 이름 정리 (재고 → 재고_부산점)', 'renameLegacyStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
     .addItem('⚙ API 설정', 'setupApiKeys')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('(구) 날짜탭 방식')
@@ -138,7 +139,7 @@ function buildGuideSheet() {
 
   add('⚡ 재고마감 자동화 — 사용안내', '', '갱신: ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'), 'title');
   add('구성', '구글시트(⚡ 재고마감 메뉴) → 중계서버(Render, 고정IP) → 이카운트 API', '이카운트가 IP를 제한해서 중계서버를 거침. 서버가 자고 있으면 최대 2분 대기 후 자동 진행', 'line');
-  add('핵심 규칙', '열려 있는 재고 탭이 곧 지점', '"재고"=부산점, "재고_일산점"=일산점. 해당 탭을 연 상태에서 메뉴 실행', 'line');
+  add('핵심 규칙', '열려 있는 재고 탭이 곧 지점', '"재고_부산점"=부산점, "재고_일산점"=일산점. 해당 탭을 연 상태에서 메뉴 실행', 'line');
   gap();
 
   sec('▶ 매일 사용법 (지점 담당자)');
@@ -164,7 +165,7 @@ function buildGuideSheet() {
 
   sec('▶ 탭 설명');
   add('탭', '역할', '비고', 'head');
-  add('재고 / 재고_지점명', '지점 작업 탭', '매일 여기서만 작업. 복제 안 함', 'line');
+  add('재고_지점명 (재고_부산점 · 재고_일산점 …)', '지점 작업 탭', '매일 여기서만 작업. 복제 안 함. 지점당 1개', 'line');
   add('일별기록', '감사 로그', '⑤ 마감 저장 시 하루 한 번 전 품목 스냅샷. 일자·지점·품목으로 필터해 과거 확인', 'line');
   add('설정', '지점 설정', '지점명·판매거래처코드·담당자코드·창고 3개(드롭다운). 지점 추가는 행 추가', 'line');
   add('품목 정보', '품목 마스터', '품목명·규격·단가·분류 참조', 'line');
@@ -183,7 +184,7 @@ function buildGuideSheet() {
   add('증상', '원인 · 조치', '', 'head');
   add('"허용되지 않은 IP [xx.xx.xx.xx]"', '중계서버 IP가 바뀜. 메시지의 IP를 이카운트 ERP › API인증키발급 › IP등록에 추가', '', 'warn');
   add('"중계 서버가 응답하지 않습니다"', '서버 기동 지연. 1~2분 후 재실행. 계속되면 Render 대시보드 확인', '', 'warn');
-  add('"지점 재고 탭을 연 상태에서 실행하세요"', '다른 탭에서 메뉴 실행함. 재고 또는 재고_지점명 탭으로 이동 후 재실행', '', 'warn');
+  add('"지점 재고 탭을 연 상태에서 실행하세요"', '다른 탭에서 메뉴 실행함. 재고_지점명 탭(예: 재고_부산점)으로 이동 후 재실행', '', 'warn');
   add('"창고코드를 찾지 못한 행"', '⑧ 지점 관리 › 창고 목록 새로고침 실행 후 재시도', '', 'warn');
   add('전표 상태 "오류: …"', '_API디버그 시트(숨김) 맨 윗줄에 이카운트 원본 응답. 담당자/거래처/창고 미등록코드 확인', '', 'warn');
   add('④ 재점검에서 차이 발생', '전표 미전송(상태 "대기") → 수량 수정 후 시트 미반영 → 타 창고 이동 순으로 확인', '', 'warn');
@@ -307,14 +308,18 @@ function getBranches_(ss) {
   return out;
 }
 
-/** 현재 활성 시트에서 지점 판별: '재고_지점명' 또는 (구) '재고'=부산점 */
+/** 현재 활성 시트에서 지점 판별: 탭 이름 '재고_지점명' */
 function branchFromActive_(ss) {
   var name = ss.getActiveSheet().getName();
   var branchName = null;
-  if (name === CONFIG.MAIN_SHEET) branchName = CONFIG.DEFAULT_BRANCH.name;
-  else if (name.indexOf('재고_') === 0) branchName = name.slice(3);
+  if (name.indexOf('재고_') === 0) branchName = name.slice(3);
+  else if (name === CONFIG.MAIN_SHEET) {
+    // (구) 이름 '재고' 탭이 남아 있으면 자동으로 '재고_부산점'으로 바꿔서 계속 진행
+    ss.getActiveSheet().setName('재고_' + CONFIG.DEFAULT_BRANCH.name);
+    branchName = CONFIG.DEFAULT_BRANCH.name;
+  }
   if (!branchName) {
-    throw new Error('지점 재고 탭([재고] 또는 [재고_지점명])을 연 상태에서 실행하세요.\n(현재 탭: ' + name + ')');
+    throw new Error('지점 재고 탭([재고_지점명], 예: 재고_부산점)을 연 상태에서 실행하세요.\n(현재 탭: ' + name + ')');
   }
   var b = getBranches_(ss)[branchName];
   if (!b) throw new Error('[설정] 탭에 "' + branchName + '" 지점이 없습니다. "⑧ 지점 관리 > 설정 탭"에서 추가하세요.');
@@ -323,6 +328,38 @@ function branchFromActive_(ss) {
   }
   b.sheet = ss.getActiveSheet();
   return b;
+}
+
+/** (구) '재고' 탭을 '재고_부산점'으로 개명하고 재고_ 탭들을 앞쪽에 모아 정렬 */
+function renameLegacyStockTab() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var legacy = ss.getSheetByName(CONFIG.MAIN_SHEET);
+  var target = '재고_' + CONFIG.DEFAULT_BRANCH.name;
+  var msg = [];
+  if (legacy) {
+    if (ss.getSheetByName(target)) { ui.alert('"' + target + '" 탭이 이미 있어 "' + CONFIG.MAIN_SHEET + '" 탭을 개명할 수 없습니다. 둘 중 하나를 정리하세요.'); return; }
+    legacy.setName(target);
+    msg.push('"' + CONFIG.MAIN_SHEET + '" → "' + target + '" 개명');
+  }
+  // 재고_ 탭을 [설정] 탭 바로 뒤에 순서대로 모음 (부산점 먼저)
+  var stockTabs = ss.getSheets().filter(function (s) { return s.getName().indexOf('재고_') === 0; });
+  stockTabs.sort(function (a, b) {
+    var an = a.getName(), bn = b.getName();
+    if (an === target) return -1;
+    if (bn === target) return 1;
+    return an < bn ? -1 : 1;
+  });
+  var anchor = ss.getSheetByName(CONFIG.SETTINGS_SHEET) || ss.getSheetByName('사용안내');
+  var pos = anchor ? anchor.getIndex() + 1 : 1;
+  stockTabs.forEach(function (s) {
+    ss.setActiveSheet(s);
+    ss.moveActiveSheet(pos);
+    pos++;
+  });
+  msg.push('재고 탭 ' + stockTabs.length + '개 정렬: ' + stockTabs.map(function (s) { return s.getName(); }).join(', '));
+  ss.setActiveSheet(ss.getSheetByName(target) || stockTabs[0]);
+  ui.alert('✅ ' + msg.join('\n'));
 }
 
 /** 지점 재고탭 생성: 해당 지점 3창고에 재고가 있는 품목으로 시드 */
@@ -370,9 +407,11 @@ function createBranchStockTab() {
     '· 인가량(E열)은 지점 기준에 맞게 직접 입력하세요.\n· 이 탭을 연 상태로 ①~⑤ 메뉴를 실행하면 ' + bName + ' 기준으로 동작합니다.');
 }
 
-/** 재고탭 공통 틀 생성 (헤더/수식/서식) — data: 19열 배열 */
+/** 재고탭 공통 틀 생성 (헤더/수식/서식) — data: 19열 배열. 기존 재고_ 탭들 바로 뒤에 배치 */
 function buildStockTabFrame_(ss, tabName, data) {
-  var main = ss.insertSheet(tabName, 1);
+  var pos = 1;
+  ss.getSheets().forEach(function (s, i) { if (s.getName().indexOf('재고_') === 0) pos = i + 1; });
+  var main = ss.insertSheet(tabName, pos);
   main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 (매일 실사)', '', '', '']]);
   main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고(자동)', '']]);
   main.getRange(1, COL.USAGE, 1, 4).setValues([['발주', '', '', '']]);
@@ -420,8 +459,9 @@ function buildNewStructure() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
 
-  if (ss.getSheetByName(CONFIG.MAIN_SHEET)) {
-    ui.alert('"' + CONFIG.MAIN_SHEET + '" 탭이 이미 있습니다. 초기 구축은 최초 1회만 실행하세요.');
+  var mainName = '재고_' + CONFIG.DEFAULT_BRANCH.name;
+  if (ss.getSheetByName(mainName) || ss.getSheetByName(CONFIG.MAIN_SHEET)) {
+    ui.alert('"' + mainName + '" 탭이 이미 있습니다. 초기 구축은 최초 1회만 실행하세요.');
     return;
   }
 
@@ -439,7 +479,7 @@ function buildNewStructure() {
       '', '', '', '', '', '', '', '', '', '', r[27] || '', '', '', '']);
   });
   var n = rows.length;
-  buildStockTabFrame_(ss, CONFIG.MAIN_SHEET, rows);
+  buildStockTabFrame_(ss, mainName, rows);
 
   // 일별기록 탭
   if (!ss.getSheetByName(CONFIG.LOG_SHEET)) {
