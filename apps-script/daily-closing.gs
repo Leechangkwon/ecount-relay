@@ -105,6 +105,7 @@ function onOpen() {
     .addSeparator()
     .addItem('⓪ 새 구조 초기 구축 (최초 1회)', 'buildNewStructure')
     .addItem('⑥ 과거 날짜탭 아카이브', 'archiveOldTabs')
+    .addItem('⑦ 사용안내 탭 만들기/갱신', 'buildGuideSheet')
     .addSeparator()
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑧ 지점 관리')
       .addItem('설정 탭 생성/열기', 'openSettings')
@@ -116,6 +117,104 @@ function onOpen() {
       .addItem('오늘 탭 생성', 'createTodayTab')
       .addItem('마감재고만 다시 받기', 'refetchClosingStock'))
     .addToUi();
+}
+
+// ══════════════════════════ ⑦ 사용안내 탭 ══════════════════════════
+
+/** [사용안내] 탭 생성/갱신 — 매일 사용법·탭 설명·문제 대처를 시트 안에 둔다 */
+function buildGuideSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var name = '사용안내';
+  var sheet = ss.getSheetByName(name);
+  if (sheet) sheet.clear();
+  else sheet = ss.insertSheet(name, 0);
+
+  var C_HEAD = '#0e6f6a', C_HEAD_TXT = '#ffffff', C_SEC = '#e2f1ef', C_STEP = '#fff9c4', C_WARN = '#fbeedb', C_LINE = '#f4f6f7';
+  var rows = [];   // [A, B, C]
+  var fmt = [];    // {row, kind}
+  function add(a, b, c, kind) { rows.push([a || '', b || '', c || '']); fmt.push(kind || ''); }
+  function sec(t) { add(t, '', '', 'sec'); }
+  function gap() { add('', '', '', 'gap'); }
+
+  add('⚡ 재고마감 자동화 — 사용안내', '', '갱신: ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'), 'title');
+  add('구성', '구글시트(⚡ 재고마감 메뉴) → 중계서버(Render, 고정IP) → 이카운트 API', '이카운트가 IP를 제한해서 중계서버를 거침. 서버가 자고 있으면 최대 2분 대기 후 자동 진행', 'line');
+  add('핵심 규칙', '열려 있는 재고 탭이 곧 지점', '"재고"=부산점, "재고_일산점"=일산점. 해당 탭을 연 상태에서 메뉴 실행', 'line');
+  gap();
+
+  sec('▶ 매일 사용법 (지점 담당자)');
+  add('순서', '할 일', '설명', 'head');
+  add('1', '⚡ 재고마감 › ① 아침 준비', '전일 마감 기준 중앙공급실 재고(F열)·창고/수술방 실재고(J·K열)를 이카운트에서 받아 채우고 입력칸을 비움', 'step');
+  add('2', '중앙공급실 실사 → G열(노란칸)에 입력', '센 품목만 숫자 입력. 안 센 품목은 빈칸으로(판매 계산 제외). 환입·구매입고·페일은 L·M·N열. 판매(H)·부족수량(I)은 자동', 'step');
+  add('3', '② 마감 전표 미리보기 → _전표전송 탭 검토', '판매·중앙→수술방 이동은 전일자, 창고→중앙 보충 이동은 오늘 날짜. 수량 수정 가능, 빼려면 행 삭제', 'step');
+  add('4', '③ 전표 전송 → 확인창 "예"', '이카운트에 판매·창고이동 전표 생성. 전표번호는 _전표전송 K열. 같은 전표는 두 번 안 나감', 'step');
+  add('5', '④ 재고 재점검', '이카운트 실재고를 다시 받아 기대재고와 대조. 차이 품목만 _재고점검 탭에 표시. 0건이면 정상', 'step');
+  add('6', '⑤ 마감 저장 (퇴근 전)', '전 품목 상태를 일별기록에 저장. 담당자 실수 추적·사용량(1일)·발주수량 계산의 근거', 'step');
+  gap();
+
+  sec('▶ 재고 탭 열 안내');
+  add('열', '항목', '설명', 'head');
+  add('A~E', '중분류·거래처·품목코드·품목명·인가량', '인가량(E)은 지점 기준으로 직접 입력. 비어 있으면 부족수량 계산 안 됨', 'line');
+  add('F', '전일재고 (자동)', '① 아침 준비 시 이카운트 전일 마감 중앙공급실 재고', 'line');
+  add('G', '오늘 실사 (입력)', '중앙공급실 실사값. 판매 = F − G', 'line');
+  add('H · I', '판매 · 부족수량 (수식)', '부족수량 = 인가량 − 실사 (0 미만이면 0)', 'line');
+  add('J · K', '창고 실재고 · 수술방 실재고 (자동)', '참고용. 이카운트 실재고', 'line');
+  add('L · M · N', '환입 · 구매입고 · 페일 (입력)', '있는 날만 입력', 'line');
+  add('O~R', '사용량(1일) · 사용예정일 · 필요수량 · 발주수량', '사용량은 일별기록 최근 14일 판매 평균(자동). 사용예정일(P)만 입력하면 필요·발주수량 자동(5단위)', 'line');
+  gap();
+
+  sec('▶ 탭 설명');
+  add('탭', '역할', '비고', 'head');
+  add('재고 / 재고_지점명', '지점 작업 탭', '매일 여기서만 작업. 복제 안 함', 'line');
+  add('일별기록', '감사 로그', '⑤ 마감 저장 시 하루 한 번 전 품목 스냅샷. 일자·지점·품목으로 필터해 과거 확인', 'line');
+  add('설정', '지점 설정', '지점명·판매거래처코드·담당자코드·창고 3개(드롭다운). 지점 추가는 행 추가', 'line');
+  add('품목 정보', '품목 마스터', '품목명·규격·단가·분류 참조', 'line');
+  add('_전표전송 / _재고점검', '작업 결과', '②③④ 실행 결과. 매번 덮어씀', 'line');
+  add('_창고목록 / _API디버그', '숨김', '창고 드롭다운 소스 / API 원본 응답(오류 원인 확인용, 최근 30건)', 'line');
+  gap();
+
+  sec('▶ 지점 추가');
+  add('1', '⑧ 지점 관리 › 설정 탭 생성/열기', '행 추가 후 지점명·판매거래처코드(이카운트 거래처코드)·담당자코드 입력', 'step');
+  add('2', '⑧ 지점 관리 › 창고 목록 새로고침', '이카운트 창고 전체를 받아 D~F열 드롭다운 갱신', 'step');
+  add('3', '설정 탭에서 수술방·중앙공급실·보관창고 선택', '드롭다운에서 선택 (창고명이 이카운트와 정확히 같아야 함)', 'step');
+  add('4', '⑧ 지점 관리 › 지점 재고탭 생성', '지점명 입력 → 지점 창고에 재고 있는 품목으로 재고_지점명 탭 자동 생성. 이후 인가량(E) 입력', 'step');
+  gap();
+
+  sec('▶ 문제가 생기면');
+  add('증상', '원인 · 조치', '', 'head');
+  add('"허용되지 않은 IP [xx.xx.xx.xx]"', '중계서버 IP가 바뀜. 메시지의 IP를 이카운트 ERP › API인증키발급 › IP등록에 추가', '', 'warn');
+  add('"중계 서버가 응답하지 않습니다"', '서버 기동 지연. 1~2분 후 재실행. 계속되면 Render 대시보드 확인', '', 'warn');
+  add('"지점 재고 탭을 연 상태에서 실행하세요"', '다른 탭에서 메뉴 실행함. 재고 또는 재고_지점명 탭으로 이동 후 재실행', '', 'warn');
+  add('"창고코드를 찾지 못한 행"', '⑧ 지점 관리 › 창고 목록 새로고침 실행 후 재시도', '', 'warn');
+  add('전표 상태 "오류: …"', '_API디버그 시트(숨김) 맨 윗줄에 이카운트 원본 응답. 담당자/거래처/창고 미등록코드 확인', '', 'warn');
+  add('④ 재점검에서 차이 발생', '전표 미전송(상태 "대기") → 수량 수정 후 시트 미반영 → 타 창고 이동 순으로 확인', '', 'warn');
+  gap();
+
+  sec('▶ 링크');
+  add('스크립트', 'script.google.com › 재고마감 자동화 프로젝트', '', 'line');
+  add('서버 코드·스크립트 백업', 'github.com/Leechangkwon/ecount-relay', 'apps-script/daily-closing.gs', 'line');
+  add('서버 관리', 'dashboard.render.com › ecount-relay', '', 'line');
+
+  sheet.getRange(1, 1, rows.length, 3).setValues(rows);
+  sheet.setColumnWidth(1, 200);
+  sheet.setColumnWidth(2, 380);
+  sheet.setColumnWidth(3, 520);
+  sheet.getRange(1, 1, rows.length, 3).setWrap(true).setVerticalAlignment('top').setFontSize(10);
+
+  fmt.forEach(function (kind, i) {
+    var r = i + 1;
+    var rng = sheet.getRange(r, 1, 1, 3);
+    if (kind === 'title') { rng.setFontSize(14).setFontWeight('bold'); sheet.getRange(r, 3).setFontSize(9).setFontColor('#7c8a94').setFontWeight('normal'); }
+    else if (kind === 'sec') { rng.setBackground(C_HEAD).setFontColor(C_HEAD_TXT).setFontWeight('bold').setFontSize(11); sheet.getRange(r, 1, 1, 3).mergeAcross(); }
+    else if (kind === 'head') { rng.setBackground(C_SEC).setFontWeight('bold').setFontColor('#0e6f6a'); }
+    else if (kind === 'step') { sheet.getRange(r, 1).setBackground(C_STEP).setFontWeight('bold').setHorizontalAlignment('center'); sheet.getRange(r, 2).setFontWeight('bold'); }
+    else if (kind === 'warn') { sheet.getRange(r, 1).setBackground(C_WARN).setFontWeight('bold'); }
+    else if (kind === 'line') { sheet.getRange(r, 1).setFontWeight('bold').setFontColor('#4a5963'); }
+  });
+  sheet.setFrozenRows(1);
+  sheet.setHiddenGridlines(true);
+  ss.setActiveSheet(sheet);
+  ss.moveActiveSheet(1);
+  SpreadsheetApp.getUi().alert('[사용안내] 탭을 갱신했습니다. (탭 맨 앞에 배치)');
 }
 
 // ══════════════════════════ ⑧ 지점 관리 ══════════════════════════
