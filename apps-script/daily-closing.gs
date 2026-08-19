@@ -920,9 +920,18 @@ function sizeKey_(name, size) {
   // 1) 스트라우만식: Ø4.1mm ... 8mm / Ø4.1 / 8mm
   m = s.match(/Ø\s*(\d+(?:\.\d+)?)\s*mm?[^0-9]*?(\d+(?:\.\d+)?)\s*mm/i) || String(size || '').match(/Ø\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*mm/i);
   if (m) return { series: (s.match(/^[A-Za-z]+/) || [''])[0].toUpperCase(), dia: Number(m[1]), len: Number(m[2]) };
-  // 2) 계열문자 + 4자리 숫자 (직경2 + 길이2)  예: ZMTR4011, TS3S4508BV5, ST4507C, ZESTR4007C1, MIIP3512HT, IF5507DC
-  m = s.match(/^([A-Za-z]+(?:\d[A-Za-z]+)?)[- ]?(\d{2})(\d{2})(?![\d])/);
-  if (m) return { series: m[1].toUpperCase(), dia: Number(m[2]) / 10, len: Number(m[3]) };
+  // 2) 계열문자 + 4자리 숫자 (직경2 + 길이2) + 표면/버전 접미  예: ZMTR4011, TS3S4508BV5, ST4507C, ZESTR4007C1, MIIP3512HT, IF5507DC
+  m = s.match(/^([A-Za-z]+(?:\d[A-Za-z]+)?)[- ]?(\d{2})(\d{2})([A-Za-z]*)/);
+  if (m) {
+    var series = m[1].toUpperCase();
+    // 오스템 TS3M/TS3S: 사이즈 뒤 A=SOI, B=BA, C=CA 표면 구분 → 계열에 붙여 따로 묶음 (V2/V4/V5 버전은 무시)
+    if (/^TS3[MS]$/.test(series)) {
+      var surf = (m[4] || '').toUpperCase().charAt(0);
+      var surfName = { A: 'SOI', B: 'BA', C: 'CA' }[surf];
+      if (surfName) series = series + '-' + surfName;
+    }
+    return { series: series, dia: Number(m[2]) / 10, len: Number(m[3]) };
+  }
   // 3) 계열문자 + 3자리 (직경1 + 높이2)  예: STHA405R, AROHAN 309, AROCSR 3705(4자리→규칙2)
   m = s.match(/^([A-Za-z]+(?:\s*-\s*[A-Za-z]+)?)\s*(\d)(\d{2})(?![\d])/);
   if (m) return { series: m[1].replace(/\s+/g, '').toUpperCase(), dia: Number(m[2]), len: Number(m[3]) };
