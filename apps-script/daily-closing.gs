@@ -696,7 +696,16 @@ function importAuthQtyToStockTab() {
   var b;
   try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
   var src = ss.getSheetByName('인가량_' + b.name);
-  if (!src) { ui.alert('[인가량_' + b.name + '] 탭이 없습니다.\n인가량 파일의 시트를 이 이름으로 붙여넣으세요 (A품목코드 B품목명 C창고인가량 D공급실인가량, 1행 헤더).'); return; }
+  if (!src) {
+    // 탭이 없으면 별도 스프레드시트 ID/URL 입력받아 복사해 옴
+    var res = ui.prompt('[인가량_' + b.name + '] 탭이 없습니다.\n인가량 스프레드시트의 URL 또는 ID를 입력하면 첫 시트를 [인가량_' + b.name + '] 탭으로 복사합니다.\n(열: A품목코드 B품목명 C창고인가량 D공급실인가량, 1행 헤더)', ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() !== ui.Button.OK) return;
+    var idm = res.getResponseText().trim().match(/[-\w]{25,}/);
+    if (!idm) { ui.alert('스프레드시트 ID를 해석할 수 없습니다.'); return; }
+    var ext = SpreadsheetApp.openById(idm[0]).getSheets()[0];
+    src = ext.copyTo(ss).setName('인가량_' + b.name);
+    src.hideSheet();
+  }
   var map = loadCodeMap_(ss);
   var wh = {}, cen = {};
   src.getDataRange().getValues().slice(1).forEach(function (r) {
