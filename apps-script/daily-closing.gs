@@ -1021,31 +1021,63 @@ function buildCountSheet_(ss, b, quiet) {
   });
   items.sort(countCompare_);
 
-  var out = items.map(function (it) {
-    return [it.cat, it.series, it.dia < 999 ? it.dia : '', it.len < 999 ? it.len : '', it.code, it.name, it.size,
-      it.prev, it.count === '' ? '' : it.count, it.storage, it.surgery, it.srcRow];
-  });
-  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
-  if (sheet) sheet.clear();
-  else sheet = ss.insertSheet(CONFIG.COUNT_SHEET, ss.getSheets().length);
-  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 실사 리스트 ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d') +
-    ' — 계열·직경·길이 순. I열(실사)에 입력 후 "⑩ 실사 리스트 → 재고 탭 반영". 인쇄용: 파일 › 인쇄 (L열은 숨김)');
-  sheet.getRange(2, 1, 1, 12).setValues([['중분류', '계열', 'Ø', 'L', '품목코드', '품목명', '규격', '전일 중앙', '실사 입력', '창고', '수술방', '원본행']])
-    .setFontWeight('bold').setBackground('#e2f1ef');
-  sheet.getRange(3, 1, out.length, 12).setValues(out);
-  sheet.getRange(3, 9, out.length, 1).setBackground('#fff9c4');
-  sheet.setFrozenRows(2);
-  sheet.setColumnWidth(6, 260); sheet.setColumnWidth(7, 160);
-  sheet.hideColumns(12);
-  // 계열이 바뀌는 행에 윗선 (실물 세는 단위 구분)
-  for (var i = 1; i < out.length; i++) {
-    if (out[i][1] !== out[i - 1][1] || out[i][0] !== out[i - 1][0]) {
-      sheet.getRange(3 + i, 1, 1, 11).setBorder(true, null, null, null, null, null, '#0e6f6a', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  // 출력 구성: 중분류 밴드(진한) → 계열 밴드(연한) → 품목 행. 밴드 행은 원본행(L) 비움
+  var out = [], catBands = [], seriesBands = [], itemRows = [];
+  var lastCat = null, lastSeries = null;
+  items.forEach(function (it) {
+    if (it.cat !== lastCat) {
+      out.push(['▶ ' + it.cat, '', '', '', '', '', '', '', '', '', '', '']);
+      catBands.push(out.length); lastCat = it.cat; lastSeries = null;
     }
-  }
+    if (it.series !== lastSeries) {
+      out.push(['', it.series, '', '', '', '', '', '', '', '', '', '']);
+      seriesBands.push(out.length); lastSeries = it.series;
+    }
+    out.push([it.cat, it.series, it.dia < 999 ? it.dia : '', it.len < 999 ? it.len : '', it.code, it.name, it.size,
+      it.prev, it.count === '' ? '' : it.count, it.storage, it.surgery, it.srcRow]);
+    itemRows.push(out.length);
+  });
+
+  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
+  if (sheet) { sheet.clear(); sheet.clearFormats(); if (sheet.getMaxColumns() >= 12) sheet.showColumns(12); }
+  else sheet = ss.insertSheet(CONFIG.COUNT_SHEET, ss.getSheets().length);
+  var HEAD = 2, START = 3, COLS = 12;
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 실사 리스트 ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d (E)') +
+    ' — 실사값은 I열(노란칸)에 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"');
+  sheet.getRange(1, 1).setFontWeight('bold').setFontSize(12).setFontColor('#0e6f6a');
+  sheet.getRange(HEAD, 1, 1, COLS).setValues([['중분류', '계열', 'Ø', 'L', '품목코드', '품목명', '규격', '전일 중앙', '실사 입력', '창고', '수술방', '원본행']])
+    .setFontWeight('bold').setBackground('#0e6f6a').setFontColor('#ffffff').setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sheet.setRowHeight(HEAD, 28);
+  sheet.getRange(START, 1, out.length, COLS).setValues(out).setFontSize(10).setVerticalAlignment('middle');
+  sheet.setFrozenRows(HEAD);
+
+  // 열 너비·정렬
+  [[1, 70], [2, 90], [3, 40], [4, 40], [5, 95], [6, 250], [7, 150], [8, 70], [9, 80], [10, 60], [11, 60]].forEach(function (cw) { sheet.setColumnWidth(cw[0], cw[1]); });
+  sheet.getRange(START, 3, out.length, 2).setHorizontalAlignment('center');
+  sheet.getRange(START, 8, out.length, 4).setHorizontalAlignment('center');
+  sheet.getRange(START, 1, out.length, 1).setFontColor('#9aa5ad').setFontSize(9); // 품목행의 중분류는 흐리게(밴드가 대신 표시)
+
+  // 밴드 서식
+  catBands.forEach(function (r) {
+    var rng = sheet.getRange(START + r - 1, 1, 1, COLS - 1);
+    rng.merge().setBackground('#1f4e5f').setFontColor('#ffffff').setFontWeight('bold').setFontSize(11).setHorizontalAlignment('left');
+    sheet.setRowHeight(START + r - 1, 26);
+  });
+  seriesBands.forEach(function (r) {
+    var rng = sheet.getRange(START + r - 1, 1, 1, COLS - 1);
+    rng.setBackground('#e2f1ef').setFontColor('#0e6f6a').setFontWeight('bold');
+    sheet.getRange(START + r - 1, 2).setHorizontalAlignment('left');
+    sheet.getRange(START + r - 1, 1, 1, COLS - 1).setBorder(true, null, null, null, null, null, '#0e6f6a', SpreadsheetApp.BorderStyle.SOLID);
+  });
+  // 품목행: 실사칸 노랑 + 얇은 가로 격자
+  itemRows.forEach(function (r) { sheet.getRange(START + r - 1, 9).setBackground('#fff9c4'); });
+  sheet.getRange(START, 1, out.length, COLS - 1).setBorder(null, null, null, null, null, true, '#dde3e7', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.getRange(START, 1, out.length, COLS - 1).setBorder(null, true, null, true, true, null, '#dde3e7', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.hideColumns(12);
+  sheet.setHiddenGridlines(true);
   sheet.showSheet();
   if (!quiet) ss.setActiveSheet(sheet);
-  return out.length;
+  return items.length;
 }
 
 /** [_실사리스트] I열 실사값 → 활성 지점 재고 탭 G열 (원본행 기준, 코드 재확인) */
