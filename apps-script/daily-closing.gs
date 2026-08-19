@@ -815,9 +815,13 @@ function buildPurchaseOrderSheet() {
   else sheet = ss.insertSheet(CONFIG.PO_SHEET, ss.getSheets().length);
   sheet.getRange(1, 1).setValue('[' + b.name + '] 발주계획 ' + ymd + ' — 이카운트 발주계획 웹자료올리기 양식. 3행부터 끝까지 복사 → 양식(Template.xlsx) 2행에 붙여넣기. 순번=거래처별 전표 묶음, 납기 ' + due + '. 수량·단가는 수정 가능');
   sheet.getRange(2, 1, 1, PO_HEADERS.length).setValues([PO_HEADERS]).setFontWeight('bold').setBackground('#e2f1ef');
-  sheet.getRange(3, 1, lines.length, PO_HEADERS.length).setValues(lines.map(function (l) { return l.row; }));
-  sheet.getRange(3, 1, lines.length, 1).setNumberFormat('@');   // 일자 텍스트 유지
-  sheet.getRange(3, 8, lines.length, 1).setNumberFormat('@');   // 납기일자
+  // 코드류 열(일자·순번·담당자·창고·거래유형·납기·품목코드·거래처코드)은 텍스트로 — 앞의 0 보존, 소수점 방지
+  [1, 2, 3, 4, 5, 8, 11, 13].forEach(function (c) { sheet.getRange(3, c, lines.length, 1).setNumberFormat('@'); });
+  sheet.getRange(3, 1, lines.length, PO_HEADERS.length).setValues(lines.map(function (l) {
+    var r = l.row.slice();
+    [0, 1, 2, 3, 4, 7, 10, 12].forEach(function (i) { r[i] = String(r[i] == null ? '' : r[i]); });
+    return r;
+  }));
   sheet.setFrozenRows(2);
   sheet.setColumnWidth(12, 220); sheet.setColumnWidth(14, 160); sheet.setColumnWidth(21, 160);
   sheet.showSheet();
