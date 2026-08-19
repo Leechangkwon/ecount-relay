@@ -129,8 +129,9 @@ function onOpen() {
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
       .addItem('발주서 양식 생성 (_발주서 탭 → 이카운트 웹자료올리기)', 'buildPurchaseOrderSheet')
       .addSeparator()
-      .addItem('실사 리스트 생성 (계열·사이즈 정렬)', 'buildCountSheet')
+      .addItem('실사 리스트 생성 (계열·사이즈 정렬) — ① 아침 준비 시 자동', 'buildCountSheet')
       .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
+      .addItem('재고 탭 자체를 실사 순서로 정렬 (1회)', 'sortStockTabLikeCount')
       .addSeparator()
       .addItem('재고 탭 빈 중분류·거래처·품목명 채우기 (품목 정보 기준)', 'fillStockTabMaster')
       .addItem('품목 정보 최신화 (이카운트 품목조회 API)', 'refreshItemMaster')
@@ -931,8 +932,19 @@ function sizeKey_(name, size) {
   return { series: (s.match(/^[A-Za-z가-힣]+/) || [s.slice(0, 4)])[0].toUpperCase(), dia: 999, len: 999 };
 }
 
-/** 실사 리스트 생성: 활성 지점 재고 탭 → [_실사리스트] (중분류 → 계열 → 직경 → 길이 → 코드 순) */
+/** 실사 리스트 생성 (메뉴): 활성 지점 재고 탭 → [_실사리스트] (중분류 → 계열 → 직경 → 길이 → 코드 순) */
 function buildCountSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var n = buildCountSheet_(ss, b, false);
+  ui.alert('✅ [' + b.name + '] 실사 리스트 ' + n + '품목 생성 (중분류 → 계열 → Ø → L 순)\n' +
+    'I열에 실사값 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"을 누르면 재고 탭 G열로 옮겨집니다.');
+}
+
+/** 재고 탭 자체를 실사 순서(중분류→계열→Ø→L)로 정렬 — 1회 실행, 데이터·수식 유지 */
+function sortStockTabLikeCount() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
   var b;
@@ -940,7 +952,44 @@ function buildCountSheet() {
   var main = b.sheet;
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+  if (n <= 0) return;
+  var sizeInfo = {}, catInfo = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    if (r[3]) { var cd = String(r[3]).trim(); sizeInfo[cd] = String(r[5] || ''); catInfo[cd] = String(r[2] || ''); }
+  });
+  var rng = main.getRange(startRow, 1, n, 20);
+  var vals = rng.getValues();
+  var keyed = vals.map(function (r, i) {
+    var code = String(r[COL.CODE - 1] || '').trim();
+    var k = sizeKey_(String(r[COL.NAME - 1] || ''), sizeInfo[code]);
+    return { r: r, i: i, cat: String(r[COL.CAT - 1] || '').trim() || catInfo[code] || '기타', series: k.series, dia: k.dia, len: k.len, code: code };
+  });
+  keyed.sort(countCompare_);
+  // 수식 열은 다시 써야 하므로 값만 정렬 후 수식 재적용
+  rng.setValues(keyed.map(function (x) { return x.r; }));
+  writeStockFormulas_(main, startRow, n);
+  ui.alert('✅ [' + b.name + '] 재고 탭을 실사 순서로 정렬했습니다 (' + n + '품목). 이제 재고 탭에서 바로 순서대로 실사 입력 가능.');
+}
+
+var COUNT_CAT_ORDER = ['픽스쳐', '힐링', '커버스크류', '코핑', 'MUA', '스캔바디', '랩아날로그', '뼈이식재', '멤브레인', '페일픽스쳐'];
+function countCompare_(a, c) {
+  var ca = COUNT_CAT_ORDER.indexOf(a.cat), cc = COUNT_CAT_ORDER.indexOf(c.cat);
+  if (ca < 0) ca = 99; if (cc < 0) cc = 99;
+  if (ca !== cc) return ca - cc;
+  if (a.cat !== c.cat) return a.cat < c.cat ? -1 : 1;
+  if (a.series !== c.series) return a.series < c.series ? -1 : 1;
+  if (a.dia !== c.dia) return a.dia - c.dia;
+  if (a.len !== c.len) return a.len - c.len;
+  return a.code < c.code ? -1 : 1;
+}
+
+/** 실사 리스트 생성 (내부). quiet=true면 활성 시트를 바꾸지 않음. 반환: 품목 수 */
+function buildCountSheet_(ss, b, quiet) {
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) throw new Error('품목이 없습니다.');
   var data = main.getRange(startRow, 1, n, 20).getValues();
 
   var sizeInfo = {}, catInfo = {};
@@ -961,17 +1010,7 @@ function buildCountSheet() {
       srcRow: startRow + i
     });
   });
-  var catOrder = ['픽스쳐', '힐링', '커버스크류', '코핑', 'MUA', '스캔바디', '랩아날로그', '뼈이식재', '멤브레인', '페일픽스쳐'];
-  items.sort(function (a, c) {
-    var ca = catOrder.indexOf(a.cat), cc = catOrder.indexOf(c.cat);
-    if (ca < 0) ca = 99; if (cc < 0) cc = 99;
-    if (ca !== cc) return ca - cc;
-    if (a.cat !== c.cat) return a.cat < c.cat ? -1 : 1;
-    if (a.series !== c.series) return a.series < c.series ? -1 : 1;
-    if (a.dia !== c.dia) return a.dia - c.dia;
-    if (a.len !== c.len) return a.len - c.len;
-    return a.code < c.code ? -1 : 1;
-  });
+  items.sort(countCompare_);
 
   var out = items.map(function (it) {
     return [it.cat, it.series, it.dia < 999 ? it.dia : '', it.len < 999 ? it.len : '', it.code, it.name, it.size,
@@ -996,9 +1035,8 @@ function buildCountSheet() {
     }
   }
   sheet.showSheet();
-  ss.setActiveSheet(sheet);
-  ui.alert('✅ [' + b.name + '] 실사 리스트 ' + out.length + '품목 생성 (중분류 → 계열 → Ø → L 순)\n' +
-    'I열에 실사값 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"을 누르면 재고 탭 G열로 옮겨집니다.');
+  if (!quiet) ss.setActiveSheet(sheet);
+  return out.length;
 }
 
 /** [_실사리스트] I열 실사값 → 활성 지점 재고 탭 G열 (원본행 기준, 코드 재확인) */
@@ -1231,11 +1269,17 @@ function morningPrep() {
     main.getRange(startRow, c, n, 1).clearContent();
   });
 
+  // 실사 리스트도 오늘 값으로 자동 재생성 (전일재고·창고재고 갱신분 반영)
+  var countMsg = '';
+  try { var cnt = buildCountSheet_(ss, b, true); countMsg = '· 실사 리스트(_실사리스트) ' + cnt + '품목 재생성\n'; }
+  catch (e) { countMsg = '· ⚠ 실사 리스트 생성 실패: ' + String(e.message).slice(0, 60) + '\n'; }
+  ss.setActiveSheet(main);
+
   ui.alert('✅ [' + b.name + '] 아침 준비 완료 (기준일: ' + Utilities.formatDate(prevDate, 'Asia/Seoul', 'M/d') + ' 마감)\n' +
     '· 전일 중앙재고 / 창고·수술방 실재고 자동 입력\n' +
     '· 실사·환입·구매입고·페일 입력칸 초기화, 발주 커버일수 ' + cover + '일로 리셋\n' +
-    '· 일사용량: ' + usageRes.source + '\n\n' +
-    '이제 중앙공급실 실사값을 G열에 입력하세요. (실사 안 한 품목은 빈칸)\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
+    '· 일사용량: ' + usageRes.source + '\n' + countMsg + '\n' +
+    '실사는 [_실사리스트] I열에 입력 → "⑩ 실사 리스트 → 재고 탭 반영"  (또는 재고 탭 G열에 직접 입력)\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
 }
 
 /**
