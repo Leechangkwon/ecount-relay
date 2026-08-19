@@ -473,7 +473,8 @@ function refreshWarehouseList() {
   if (sheet) sheet.clearContents();
   else sheet = ss.insertSheet(CONFIG.WHLIST_SHEET, ss.getSheets().length);
   sheet.getRange(1, 1, 1, 2).setValues([['창고코드', '창고명']]);
-  sheet.getRange(2, 1, names.length, 2).setValues(names.map(function (n) { return [wh[n], n]; }));
+  sheet.getRange(2, 1, names.length, 1).setNumberFormat('@'); // 창고코드 '00011' 앞 0 보존
+  sheet.getRange(2, 1, names.length, 2).setValues(names.map(function (n) { return [String(wh[n]), n]; }));
   sheet.hideSheet();
 
   var settings = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
@@ -490,13 +491,20 @@ function applyWhValidation_(ss, settings) {
 }
 
 /** 창고명 → 창고코드 맵 ([_창고목록] 우선, 없으면 CONFIG.WH_CODES) */
+/** 이카운트 창고코드는 5자리 문자열(예: '00011'). 숫자로 저장돼 0이 사라진 경우 복원 */
+function whCode5_(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (/^\d{1,4}$/.test(s)) s = ('00000' + s).slice(-5);
+  return s;
+}
+
 function loadWhMap_(ss) {
   var map = {};
   Object.keys(CONFIG.WH_CODES).forEach(function (k) { map[k] = CONFIG.WH_CODES[k]; });
   var sheet = ss.getSheetByName(CONFIG.WHLIST_SHEET);
   if (sheet && sheet.getLastRow() > 1) {
     sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues().forEach(function (r) {
-      if (r[0] && r[1]) map[String(r[1]).trim()] = String(r[0]).trim();
+      if (r[0] !== '' && r[0] != null && r[1]) map[String(r[1]).trim()] = whCode5_(r[0]);
     });
   }
   return map;
