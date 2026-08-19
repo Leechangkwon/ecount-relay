@@ -795,24 +795,37 @@ function refreshItemMaster() {
   var rows = (data && (data.Result || data.Results || (data.Datas && data.Datas.Result))) || [];
   if (!rows.length) { ui.alert('품목조회 응답에 데이터가 없습니다. "_API디버그" 시트를 확인하세요.\n응답 키: ' + Object.keys(data || {}).join(', ')); return; }
 
-  var pick = function (r, keys) { for (var i = 0; i < keys.length; i++) { var v = r[keys[i]]; if (v != null && v !== '') return v; } return ''; };
+  // 품목조회 응답(확인됨): PROD_CD, PROD_DES, SIZE_DES, UNIT, IN_PRICE, CUST(거래처코드), CLASS_CD(대분류코드), CLASS_CD2(중분류코드)
+  // 코드→이름은 응답에 없으므로 기존 [품목 정보]에서 학습 (같은 코드를 가진 기존 품목의 이름 중 최빈값)
+  var last = sheet.getLastRow();
+  var existing = last > 1 ? sheet.getRange(2, 1, last - 1, 8).getValues() : [];
+  var apiByCode = {};
+  rows.forEach(function (r) { var cd = String(r.PROD_CD || '').trim(); if (cd) apiByCode[cd] = r; });
+  var custName = {}, cls1Name = {}, cls2Name = {};
+  function learn(map, key, val) { if (!key || !val) return; if (!map[key]) map[key] = {}; map[key][val] = (map[key][val] || 0) + 1; }
+  function best(map, key) { var m = map[key]; if (!m) return ''; var b = '', n = 0; Object.keys(m).forEach(function (k) { if (m[k] > n) { n = m[k]; b = k; } }); return b; }
+  existing.forEach(function (r) {
+    var cd = String(r[3] || '').trim(); var a = apiByCode[cd]; if (!a) return;
+    learn(custName, String(a.CUST || ''), String(r[0] || '').trim());
+    learn(cls1Name, String(a.CLASS_CD || ''), String(r[1] || '').trim());
+    learn(cls2Name, String(a.CLASS_CD2 || ''), String(r[2] || '').trim());
+  });
+
   var byCode = {};
   rows.forEach(function (r) {
-    var cd = String(pick(r, ['PROD_CD', 'ProdCd']) || '').trim();
+    var cd = String(r.PROD_CD || '').trim();
     if (!cd) return;
     byCode[cd] = {
-      vendor: String(pick(r, ['CUST_DES', 'CUST_NM', 'CUST', 'VENDOR_DES', 'PURCHASE_CUST_DES']) || ''),
-      cat1: String(pick(r, ['CLASS_DES', 'CLASS_CD_DES', 'PROD_CLASS_DES', 'CLASS1_DES', 'CLASS_DES1']) || ''),
-      cat2: String(pick(r, ['CLASS2_DES', 'CLASS_DES2', 'SUB_CLASS_DES', 'CLASS_CD2_DES']) || ''),
-      name: String(pick(r, ['PROD_DES', 'ProdDes']) || ''),
-      size: String(pick(r, ['SIZE_DES', 'ProdSizeDes', 'PROD_SIZE_DES']) || ''),
-      unit: String(pick(r, ['UNIT', 'UNIT_DES']) || ''),
-      price: Number(pick(r, ['IN_PRICE', 'PURCHASE_PRICE', 'BUY_PRICE', 'PRICE_IN', 'IN_PRICE1'])) || ''
+      vendor: best(custName, String(r.CUST || '')) || (r.CUST ? '(거래처코드 ' + r.CUST + ')' : ''),
+      cat1: best(cls1Name, String(r.CLASS_CD || '')),
+      cat2: best(cls2Name, String(r.CLASS_CD2 || '')),
+      name: String(r.PROD_DES || ''),
+      size: String(r.SIZE_DES || ''),
+      unit: String(r.UNIT || ''),
+      price: Number(r.IN_PRICE) || ''
     };
   });
 
-  var last = sheet.getLastRow();
-  var existing = last > 1 ? sheet.getRange(2, 1, last - 1, 8).getValues() : [];
   var seen = {}, updated = 0;
   existing.forEach(function (r, i) {
     var cd = String(r[3] || '').trim();
@@ -841,7 +854,7 @@ function refreshItemMaster() {
   });
   if (added.length) sheet.getRange(sheet.getLastRow() + 1, 1, added.length, 8).setValues(added);
 
-  ui.alert('✅ 품목 정보 최신화 — API 품목 ' + Object.keys(byCode).length + '건\n· 기존 행 갱신 ' + updated + '건\n· 신규 추가 ' + added.length + '건' +
+  ui.alert('✅ 품목 정보 최신화 — API 품목 ' + Object.keys(byCode).length + '건' + (rows.length >= 10000 ? ' (⚠ 1만 건 상한 — 일부 누락 가능)' : '') + '\n· 기존 행 갱신 ' + updated + '건\n· 신규 추가 ' + added.length + '건' +
     (added.length ? '\n\n신규 예: ' + added.slice(0, 8).map(function (a) { return a[3]; }).join(', ') : '') +
     '\n\n이어서 재고 탭에서 "빈 중분류·거래처·품목명 채우기"를 실행하세요.');
 }
