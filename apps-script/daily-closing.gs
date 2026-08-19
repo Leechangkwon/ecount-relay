@@ -32,6 +32,7 @@ var CONFIG = {
   CHECK_SHEET: '_재고점검',
   MAP_SHEET: '코드매핑',       // 구코드 → 대표코드 매핑 (같은 실물이 두 코드로 등록된 경우)
   PO_SHEET: '_발주서',         // 이카운트 발주계획 웹자료올리기 양식 출력
+  COUNT_SHEET: '_실사리스트',  // 실사용 정렬 리스트 (계열·직경·길이 순)
   PO_TRADE_TYPE: '21',        // 거래유형 (21 = 부가세율 적용)
   DEBUG_SHEET: '_API디버그',
   DATA_START_ROW: 3,
@@ -127,6 +128,9 @@ function onOpen() {
       .addItem('재고 탭에 매핑 적용 (구코드 행 합치기)', 'applyCodeMappingToStockTab'))
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
       .addItem('발주서 양식 생성 (_발주서 탭 → 이카운트 웹자료올리기)', 'buildPurchaseOrderSheet')
+      .addSeparator()
+      .addItem('실사 리스트 생성 (계열·사이즈 정렬)', 'buildCountSheet')
+      .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
       .addSeparator()
       .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
       .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
@@ -747,6 +751,127 @@ function importAuthQtyToStockTab() {
   var missing = Object.keys(cen).concat(Object.keys(wh)).filter(function (c, i, a) { return a.indexOf(c) === i && !seen[c]; });
   ui.alert('✅ [' + b.name + '] 인가량 반영\n· 공급실 인가량(E): ' + hitE + '건\n· 창고 인가량(T): ' + hitT + '건' +
     (missing.length ? '\n\n⚠ 재고 탭에 없는 코드 ' + missing.length + '건 (재고 0이라 시드에서 빠진 품목 — 필요하면 재고 탭에 행 추가):\n' + missing.slice(0, 15).join(', ') + (missing.length > 15 ? ' …' : '') : ''));
+}
+
+// ══════════════════════════ ⑩ 실사 리스트 (계열·사이즈 정렬) ══════════════════════════
+
+/**
+ * 품목명/규격에서 정렬키 추출: { series(계열문자), dia(직경), len(길이) }
+ *  ZMTR4011 → ZMTR / 4.0 / 11     TS3S4508BV5 → TS3S / 4.5 / 8     ST4507C → ST / 4.5 / 7
+ *  STHA405R → STHA / 4 / 5 (직경1+높이2)   BLT Ø4.1mm RC, SLA® 8mm → BLT / 4.1 / 8
+ *  IF5507DC → IF / 5.5 / 7    021.5508 → 021 / 5.5 / 8 (앞 2자리 직경코드)
+ */
+function sizeKey_(name, size) {
+  var s = String(name || '').trim();
+  var m;
+  // 1) 스트라우만식: Ø4.1mm ... 8mm / Ø4.1 / 8mm
+  m = s.match(/Ø\s*(\d+(?:\.\d+)?)\s*mm?[^0-9]*?(\d+(?:\.\d+)?)\s*mm/i) || String(size || '').match(/Ø\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (m) return { series: (s.match(/^[A-Za-z]+/) || [''])[0].toUpperCase(), dia: Number(m[1]), len: Number(m[2]) };
+  // 2) 계열문자 + 4자리 숫자 (직경2 + 길이2)  예: ZMTR4011, TS3S4508BV5, ST4507C, ZESTR4007C1, MIIP3512HT, IF5507DC
+  m = s.match(/^([A-Za-z]+(?:\d[A-Za-z]+)?)[- ]?(\d{2})(\d{2})(?![\d])/);
+  if (m) return { series: m[1].toUpperCase(), dia: Number(m[2]) / 10, len: Number(m[3]) };
+  // 3) 계열문자 + 3자리 (직경1 + 높이2)  예: STHA405R, AROHAN 309, AROCSR 3705(4자리→규칙2)
+  m = s.match(/^([A-Za-z]+(?:\s*-\s*[A-Za-z]+)?)\s*(\d)(\d{2})(?![\d])/);
+  if (m) return { series: m[1].replace(/\s+/g, '').toUpperCase(), dia: Number(m[2]), len: Number(m[3]) };
+  // 4) 코드형 021.5508 (스트라우만 SLA)
+  m = s.match(/^0?(\d{2})\.(\d{2})(\d{2})/) ;
+  if (m) return { series: '021', dia: Number(m[2]) / 10, len: Number(m[3]) };
+  return { series: (s.match(/^[A-Za-z가-힣]+/) || [s.slice(0, 4)])[0].toUpperCase(), dia: 999, len: 999 };
+}
+
+/** 실사 리스트 생성: 활성 지점 재고 탭 → [_실사리스트] (중분류 → 계열 → 직경 → 길이 → 코드 순) */
+function buildCountSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+  var data = main.getRange(startRow, 1, n, 20).getValues();
+
+  var sizeInfo = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) { if (r[3]) sizeInfo[String(r[3]).trim()] = String(r[5] || ''); });
+
+  var items = [];
+  data.forEach(function (r, i) {
+    var code = String(r[COL.CODE - 1] || '').trim();
+    if (!code) return;
+    var name = String(r[COL.NAME - 1] || '');
+    var k = sizeKey_(name, sizeInfo[code]);
+    items.push({
+      cat: String(r[COL.CAT - 1] || '기타'), series: k.series, dia: k.dia, len: k.len, code: code, name: name,
+      size: sizeInfo[code] || '', prev: r[COL.PREV - 1], count: r[COL.COUNT - 1], storage: r[COL.STORAGE - 1], surgery: r[COL.SURGERY - 1],
+      srcRow: startRow + i
+    });
+  });
+  var catOrder = ['픽스쳐', '힐링', '커버스크류', '코핑', 'MUA', '스캔바디', '랩아날로그', '뼈이식재', '멤브레인', '페일픽스쳐'];
+  items.sort(function (a, c) {
+    var ca = catOrder.indexOf(a.cat), cc = catOrder.indexOf(c.cat);
+    if (ca < 0) ca = 99; if (cc < 0) cc = 99;
+    if (ca !== cc) return ca - cc;
+    if (a.cat !== c.cat) return a.cat < c.cat ? -1 : 1;
+    if (a.series !== c.series) return a.series < c.series ? -1 : 1;
+    if (a.dia !== c.dia) return a.dia - c.dia;
+    if (a.len !== c.len) return a.len - c.len;
+    return a.code < c.code ? -1 : 1;
+  });
+
+  var out = items.map(function (it) {
+    return [it.cat, it.series, it.dia < 999 ? it.dia : '', it.len < 999 ? it.len : '', it.code, it.name, it.size,
+      it.prev, it.count === '' ? '' : it.count, it.storage, it.surgery, it.srcRow];
+  });
+  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
+  if (sheet) sheet.clear();
+  else sheet = ss.insertSheet(CONFIG.COUNT_SHEET, ss.getSheets().length);
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 실사 리스트 ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d') +
+    ' — 계열·직경·길이 순. I열(실사)에 입력 후 "⑩ 실사 리스트 → 재고 탭 반영". 인쇄용: 파일 › 인쇄 (L열은 숨김)');
+  sheet.getRange(2, 1, 1, 12).setValues([['중분류', '계열', 'Ø', 'L', '품목코드', '품목명', '규격', '전일 중앙', '실사 입력', '창고', '수술방', '원본행']])
+    .setFontWeight('bold').setBackground('#e2f1ef');
+  sheet.getRange(3, 1, out.length, 12).setValues(out);
+  sheet.getRange(3, 9, out.length, 1).setBackground('#fff9c4');
+  sheet.setFrozenRows(2);
+  sheet.setColumnWidth(6, 260); sheet.setColumnWidth(7, 160);
+  sheet.hideColumns(12);
+  // 계열이 바뀌는 행에 윗선 (실물 세는 단위 구분)
+  for (var i = 1; i < out.length; i++) {
+    if (out[i][1] !== out[i - 1][1] || out[i][0] !== out[i - 1][0]) {
+      sheet.getRange(3 + i, 1, 1, 11).setBorder(true, null, null, null, null, null, '#0e6f6a', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    }
+  }
+  sheet.showSheet();
+  ss.setActiveSheet(sheet);
+  ui.alert('✅ [' + b.name + '] 실사 리스트 ' + out.length + '품목 생성 (중분류 → 계열 → Ø → L 순)\n' +
+    'I열에 실사값 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"을 누르면 재고 탭 G열로 옮겨집니다.');
+}
+
+/** [_실사리스트] I열 실사값 → 활성 지점 재고 탭 G열 (원본행 기준, 코드 재확인) */
+function applyCountSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
+  if (!sheet || sheet.getLastRow() < 3) { ui.alert('[_실사리스트]가 없습니다. 먼저 "실사 리스트 생성"을 실행하세요.'); return; }
+  var title = String(sheet.getRange(1, 1).getValue());
+  var bm = title.match(/^\[(.+?)\]/);
+  if (!bm) { ui.alert('실사 리스트의 지점을 알 수 없습니다.'); return; }
+  var main = ss.getSheetByName('재고_' + bm[1]);
+  if (!main) { ui.alert('[재고_' + bm[1] + '] 탭이 없습니다.'); return; }
+  var rows = sheet.getRange(3, 1, sheet.getLastRow() - 2, 12).getValues();
+  var applied = 0, mismatch = [];
+  rows.forEach(function (r) {
+    var code = String(r[4] || '').trim(), val = r[8], srcRow = Number(r[11]);
+    if (!code || val === '' || val == null || !srcRow) return;
+    var mainCode = String(main.getRange(srcRow, COL.CODE).getValue() || '').trim();
+    if (mainCode !== code) { mismatch.push(code); return; }
+    main.getRange(srcRow, COL.COUNT).setValue(Number(val));
+    applied++;
+  });
+  ss.setActiveSheet(main);
+  ui.alert('✅ [' + bm[1] + '] 실사값 ' + applied + '건을 재고 탭 G열에 반영했습니다.' +
+    (mismatch.length ? '\n⚠ 행 불일치로 건너뜀 ' + mismatch.length + '건 (재고 탭이 바뀐 뒤 리스트를 다시 생성하세요): ' + mismatch.slice(0, 10).join(', ') : '') +
+    '\n\n이어서 ② 마감 전표 미리보기를 실행하세요.');
 }
 
 // ══════════════════════════ ⑩ 발주서 양식 (이카운트 발주계획 웹자료올리기) ══════════════════════════
