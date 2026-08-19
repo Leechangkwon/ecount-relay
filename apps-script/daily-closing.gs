@@ -133,6 +133,7 @@ function onOpen() {
       .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
       .addSeparator()
       .addItem('재고 탭 빈 중분류·거래처·품목명 채우기 (품목 정보 기준)', 'fillStockTabMaster')
+      .addItem('품목 정보 최신화 (이카운트 품목조회 API)', 'refreshItemMaster')
       .addSeparator()
       .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
       .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
@@ -753,6 +754,96 @@ function importAuthQtyToStockTab() {
   var missing = Object.keys(cen).concat(Object.keys(wh)).filter(function (c, i, a) { return a.indexOf(c) === i && !seen[c]; });
   ui.alert('✅ [' + b.name + '] 인가량 반영\n· 공급실 인가량(E): ' + hitE + '건\n· 창고 인가량(T): ' + hitT + '건' +
     (missing.length ? '\n\n⚠ 재고 탭에 없는 코드 ' + missing.length + '건 (재고 0이라 시드에서 빠진 품목 — 필요하면 재고 탭에 행 추가):\n' + missing.slice(0, 15).join(', ') + (missing.length > 15 ? ' …' : '') : ''));
+}
+
+// ══════════════════════════ ⑩ 품목 정보 최신화 (이카운트 품목조회 API) ══════════════════════════
+
+/** 중계서버 읽기 전용 조회 */
+function ecountQuery_(kind, payload, pathOverride) {
+  var relay = getRelayProps_();
+  wakeRelay_(relay);
+  var url = relay.url + '/api/ecount/query';
+  var body = { kind: kind, payload: payload || {} };
+  if (pathOverride) body.path = pathOverride;
+  var res = UrlFetchApp.fetch(url, {
+    method: 'post', contentType: 'application/json',
+    headers: { 'X-Relay-Token': relay.token },
+    payload: JSON.stringify(body), muteHttpExceptions: true
+  });
+  var code = res.getResponseCode(), text = res.getContentText();
+  logDebug_(url + ' [' + (kind || pathOverride) + ']', body, code, text);
+  var json;
+  try { json = JSON.parse(text); } catch (e) { throw new Error('HTTP ' + code + ' — 응답 해석 실패'); }
+  if (code !== 200 || !json.ok) throw new Error((json && json.msg) || ('HTTP ' + code));
+  return json.data;
+}
+
+/**
+ * 이카운트 품목조회로 [품목 정보] 탭 갱신 — 기존 행은 유지·갱신, 새 코드는 추가.
+ * 품목 정보 열: A구매처명 B대분류 C중분류 D품목코드 E품목명 F규격 G단위 H입고단가 (I~ 기타)
+ * 응답 필드는 회사 설정에 따라 다르므로 여러 후보명을 순서대로 시도한다.
+ */
+function refreshItemMaster() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var sheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (!sheet) { ui.alert('[품목 정보] 탭이 없습니다.'); return; }
+
+  var data;
+  try { data = ecountQuery_('products', {}); }
+  catch (e) { ui.alert('품목조회 실패: ' + e.message + '\n"_API디버그" 시트에서 원본 응답을 확인하세요.'); return; }
+  var rows = (data && (data.Result || data.Results || (data.Datas && data.Datas.Result))) || [];
+  if (!rows.length) { ui.alert('품목조회 응답에 데이터가 없습니다. "_API디버그" 시트를 확인하세요.\n응답 키: ' + Object.keys(data || {}).join(', ')); return; }
+
+  var pick = function (r, keys) { for (var i = 0; i < keys.length; i++) { var v = r[keys[i]]; if (v != null && v !== '') return v; } return ''; };
+  var byCode = {};
+  rows.forEach(function (r) {
+    var cd = String(pick(r, ['PROD_CD', 'ProdCd']) || '').trim();
+    if (!cd) return;
+    byCode[cd] = {
+      vendor: String(pick(r, ['CUST_DES', 'CUST_NM', 'CUST', 'VENDOR_DES', 'PURCHASE_CUST_DES']) || ''),
+      cat1: String(pick(r, ['CLASS_DES', 'CLASS_CD_DES', 'PROD_CLASS_DES', 'CLASS1_DES', 'CLASS_DES1']) || ''),
+      cat2: String(pick(r, ['CLASS2_DES', 'CLASS_DES2', 'SUB_CLASS_DES', 'CLASS_CD2_DES']) || ''),
+      name: String(pick(r, ['PROD_DES', 'ProdDes']) || ''),
+      size: String(pick(r, ['SIZE_DES', 'ProdSizeDes', 'PROD_SIZE_DES']) || ''),
+      unit: String(pick(r, ['UNIT', 'UNIT_DES']) || ''),
+      price: Number(pick(r, ['IN_PRICE', 'PURCHASE_PRICE', 'BUY_PRICE', 'PRICE_IN', 'IN_PRICE1'])) || ''
+    };
+  });
+
+  var last = sheet.getLastRow();
+  var existing = last > 1 ? sheet.getRange(2, 1, last - 1, 8).getValues() : [];
+  var seen = {}, updated = 0;
+  existing.forEach(function (r, i) {
+    var cd = String(r[3] || '').trim();
+    if (!cd) return;
+    seen[cd] = true;
+    var it = byCode[cd];
+    if (!it) return;
+    var changed = false;
+    // 빈 칸만 채움 (사람이 정리한 값은 보존). 단가는 API 값으로 갱신
+    if (!String(r[0] || '').trim() && it.vendor) { r[0] = it.vendor; changed = true; }
+    if (!String(r[1] || '').trim() && it.cat1) { r[1] = it.cat1; changed = true; }
+    if (!String(r[2] || '').trim() && it.cat2) { r[2] = it.cat2; changed = true; }
+    if (!String(r[4] || '').trim() && it.name) { r[4] = it.name; changed = true; }
+    if (!String(r[5] || '').trim() && it.size) { r[5] = it.size; changed = true; }
+    if (!String(r[6] || '').trim() && it.unit) { r[6] = it.unit; changed = true; }
+    if (it.price !== '' && Number(r[7]) !== it.price) { r[7] = it.price; changed = true; }
+    if (changed) updated++;
+  });
+  if (existing.length) sheet.getRange(2, 1, existing.length, 8).setValues(existing);
+
+  var added = [];
+  Object.keys(byCode).sort().forEach(function (cd) {
+    if (seen[cd]) return;
+    var it = byCode[cd];
+    added.push([it.vendor, it.cat1, it.cat2, cd, it.name, it.size, it.unit, it.price]);
+  });
+  if (added.length) sheet.getRange(sheet.getLastRow() + 1, 1, added.length, 8).setValues(added);
+
+  ui.alert('✅ 품목 정보 최신화 — API 품목 ' + Object.keys(byCode).length + '건\n· 기존 행 갱신 ' + updated + '건\n· 신규 추가 ' + added.length + '건' +
+    (added.length ? '\n\n신규 예: ' + added.slice(0, 8).map(function (a) { return a[3]; }).join(', ') : '') +
+    '\n\n이어서 재고 탭에서 "빈 중분류·거래처·품목명 채우기"를 실행하세요.');
 }
 
 // ══════════════════════════ ⑩ 재고 탭 마스터 보강 ══════════════════════════
