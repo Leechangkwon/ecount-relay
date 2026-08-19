@@ -181,5 +181,46 @@ def inventory():
         return jsonify({'ok': False, 'msg': str(e)}), 502
 
 
+# 조회 API 화이트리스트 (읽기 전용) — 이카운트 OAPI 문서 '기초등록API'
+QUERY_PATHS = {
+    # 품목조회(목록): 이카운트 문서 ViewBasicProductsListApi. 경로/필드는 첫 호출 결과로 확정
+    'products': os.environ.get('ECOUNT_PRODUCTS_PATH', 'InventoryBasic/GetBasicProductsList'),
+}
+
+
+@app.route('/api/ecount/query', methods=['POST'])
+def query():
+    """읽기 전용 조회 중계. body: {"kind": "products", "payload": {...}} — 이카운트 응답 Data 그대로 반환.
+    kind 미지정 시 body.path 로 직접 경로 지정 가능(디버그용, 'Get'/'View'로 시작하는 읽기 API만 허용)."""
+    if not _check_token():
+        return jsonify({'ok': False, 'msg': '토큰이 유효하지 않습니다.'}), 401
+    body = request.get_json(silent=True) or {}
+    kind = str(body.get('kind', '')).strip()
+    path = QUERY_PATHS.get(kind) or str(body.get('path', '')).strip()
+    if not path:
+        return jsonify({'ok': False, 'msg': f'kind는 {list(QUERY_PATHS)} 중 하나이거나 path를 지정하세요.'}), 400
+    last = path.split('/')[-1]
+    if not (last.startswith('Get') or last.startswith('View')):
+        return jsonify({'ok': False, 'msg': '읽기 전용 경로(Get*/View*)만 허용됩니다.'}), 400
+    payload = body.get('payload') or {}
+
+    def attempt(force_new):
+        s = _get_session(force_new)
+        url = f"https://oapi{s['zone']}.ecount.com/OAPI/V2/{path}?SESSION_ID={s['sid']}"
+        return _post(url, payload, timeout=90)
+
+    try:
+        try:
+            res = attempt(False)
+        except RuntimeError as e:
+            if any(k in str(e) for k in ('세션', 'SESSION', '로그인', '만료')):
+                res = attempt(True)
+            else:
+                raise
+        return jsonify({'ok': True, 'path': path, 'data': res.get('Data')})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 502
+
+
 if __name__ == '__main__':
     app.run(port=8100)
