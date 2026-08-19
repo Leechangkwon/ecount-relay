@@ -31,6 +31,8 @@ var CONFIG = {
   PREVIEW_SHEET: '_전표전송',
   CHECK_SHEET: '_재고점검',
   MAP_SHEET: '코드매핑',       // 구코드 → 대표코드 매핑 (같은 실물이 두 코드로 등록된 경우)
+  PO_SHEET: '_발주서',         // 이카운트 발주계획 웹자료올리기 양식 출력
+  PO_TRADE_TYPE: '21',        // 거래유형 (21 = 부가세율 적용)
   DEBUG_SHEET: '_API디버그',
   DATA_START_ROW: 3,
 
@@ -124,6 +126,8 @@ function onOpen() {
       .addItem('매핑 초안 자동 생성 / 열기', 'buildCodeMapping')
       .addItem('재고 탭에 매핑 적용 (구코드 행 합치기)', 'applyCodeMappingToStockTab'))
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
+      .addItem('발주서 양식 생성 (_발주서 탭 → 이카운트 웹자료올리기)', 'buildPurchaseOrderSheet')
+      .addSeparator()
       .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
       .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
@@ -735,6 +739,96 @@ function importAuthQtyToStockTab() {
   var missing = Object.keys(cen).concat(Object.keys(wh)).filter(function (c, i, a) { return a.indexOf(c) === i && !seen[c]; });
   ui.alert('✅ [' + b.name + '] 인가량 반영\n· 공급실 인가량(E): ' + hitE + '건\n· 창고 인가량(T): ' + hitT + '건' +
     (missing.length ? '\n\n⚠ 재고 탭에 없는 코드 ' + missing.length + '건 (재고 0이라 시드에서 빠진 품목 — 필요하면 재고 탭에 행 추가):\n' + missing.slice(0, 15).join(', ') + (missing.length > 15 ? ' …' : '') : ''));
+}
+
+// ══════════════════════════ ⑩ 발주서 양식 (이카운트 발주계획 웹자료올리기) ══════════════════════════
+
+var PO_HEADERS = ['일자', '순번', '담당자', '입고될창고', '거래유형', '통화', '환율', '납기일자', '참조', '프로젝트',
+  '품목코드', '품목명', '거래처코드', '거래처명', '규격', '수량', '단가', '외화금액', '공급가액', '부가세', '적요', '단가(vat포함)', '박스단위'];
+
+/** 발주 → 입고 납기일: 월→수, 수→금, 금→화(토 배송 없음), 그 외 요일은 +2영업일 */
+function poDueDate_(d) {
+  var dow = d.getDay(); // 0일 1월 2화 3수 4목 5금 6토
+  var add = (dow === 5) ? 4 : (dow === 6) ? 3 : 2; // 금→화, 토→화, 그 외 +2
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + add);
+}
+
+/**
+ * 활성 지점 재고 탭에서 발주수량(R)>0 품목을 뽑아 [_발주서] 탭에 이카운트 발주계획 양식(23열)으로 작성.
+ * 거래처별 순번 묶음, 담당자=지점 담당자코드, 입고창고=지점 보관창고, 단가/거래처=품목 정보.
+ * 코드매핑 대상은 대표코드(신코드)로 발주. 헤더 제외 데이터 행만 복사해 양식 2행부터 붙여넣으면 됨.
+ */
+function buildPurchaseOrderSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+  var data = main.getRange(startRow, 1, n, 20).getValues();
+
+  // 품목 정보: 코드 → {구매처, 규격, 단가, 품목명}
+  var info = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) {
+    itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+      var cd = String(r[3] || '').trim();
+      if (cd) info[cd] = { vendor: String(r[0] || '').trim(), size: String(r[5] || '').trim(), price: Number(r[7]) || 0, name: String(r[4] || '').trim() };
+    });
+  }
+  var whMap = loadWhMap_(ss);
+  var whCd = whMap[b.whStorage] || b.whStorage;
+  var today = new Date();
+  var ymd = Utilities.formatDate(today, 'Asia/Seoul', 'yyyyMMdd');
+  var due = Utilities.formatDate(poDueDate_(today), 'Asia/Seoul', 'yyyyMMdd');
+
+  var lines = [];
+  data.forEach(function (r) {
+    var code = String(r[COL.CODE - 1] || '').trim();
+    var qty = Number(r[COL.ORDER - 1]);
+    if (!code || !(qty > 0)) return;
+    var it = info[code] || {};
+    var vendor = it.vendor || String(r[COL.VENDOR - 1] || '').trim();
+    var price = it.price || 0;
+    var supply = Math.round(qty * price);
+    lines.push({ vendor: vendor, row: [
+      ymd, '', b.emp, whCd, CONFIG.PO_TRADE_TYPE, '', '', due, '', '',
+      code, it.name || String(r[COL.NAME - 1] || ''), '', vendor, it.size || '',
+      qty, price, '', supply, Math.round(supply * CONFIG.VAT_RATE), '[' + b.name + '] 자동발주 ' + Utilities.formatDate(today, 'Asia/Seoul', 'M/d'), '', ''
+    ]});
+  });
+  if (!lines.length) { ui.alert('[' + b.name + '] 발주수량이 0보다 큰 품목이 없습니다.'); return; }
+
+  // 거래처별 순번 (같은 거래처 = 같은 전표), 거래처명 정렬
+  lines.sort(function (a, b2) { return a.vendor < b2.vendor ? -1 : a.vendor > b2.vendor ? 1 : 0; });
+  var serial = 0, lastVendor = null, noVendor = 0;
+  lines.forEach(function (l) {
+    if (l.vendor !== lastVendor) { serial++; lastVendor = l.vendor; }
+    if (!l.vendor) noVendor++;
+    l.row[1] = String(serial);
+  });
+
+  var sheet = ss.getSheetByName(CONFIG.PO_SHEET);
+  if (sheet) sheet.clear();
+  else sheet = ss.insertSheet(CONFIG.PO_SHEET, ss.getSheets().length);
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 발주계획 ' + ymd + ' — 이카운트 발주계획 웹자료올리기 양식. 3행부터 끝까지 복사 → 양식(Template.xlsx) 2행에 붙여넣기. 순번=거래처별 전표 묶음, 납기 ' + due + '. 수량·단가는 수정 가능');
+  sheet.getRange(2, 1, 1, PO_HEADERS.length).setValues([PO_HEADERS]).setFontWeight('bold').setBackground('#e2f1ef');
+  sheet.getRange(3, 1, lines.length, PO_HEADERS.length).setValues(lines.map(function (l) { return l.row; }));
+  sheet.getRange(3, 1, lines.length, 1).setNumberFormat('@');   // 일자 텍스트 유지
+  sheet.getRange(3, 8, lines.length, 1).setNumberFormat('@');   // 납기일자
+  sheet.setFrozenRows(2);
+  sheet.setColumnWidth(12, 220); sheet.setColumnWidth(14, 160); sheet.setColumnWidth(21, 160);
+  sheet.showSheet();
+  ss.setActiveSheet(sheet);
+
+  var vendors = {};
+  lines.forEach(function (l) { vendors[l.vendor || '(구매처 없음)'] = (vendors[l.vendor || '(구매처 없음)'] || 0) + 1; });
+  ui.alert('✅ [' + b.name + '] 발주서 ' + lines.length + '품목 / 거래처 ' + serial + '건 생성\n' +
+    Object.keys(vendors).map(function (v) { return '· ' + v + ': ' + vendors[v] + '품목'; }).join('\n') +
+    (noVendor ? '\n\n⚠ 구매처 없는 품목 ' + noVendor + '건 — 거래처명(N열) 직접 입력' : '') +
+    '\n\n[_발주서] 탭 3행부터 복사 → 이카운트 발주계획 웹자료올리기 양식 2행에 붙여넣기');
 }
 
 /** 기존 재고탭을 새 발주 블록(일사용량·커버일수·목표재고·발주수량·창고인가량)으로 갱신 — 데이터는 유지 */
