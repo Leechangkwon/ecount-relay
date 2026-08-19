@@ -30,6 +30,7 @@ var CONFIG = {
   WHLIST_SHEET: '_창고목록',
   PREVIEW_SHEET: '_전표전송',
   CHECK_SHEET: '_재고점검',
+  MAP_SHEET: '코드매핑',       // 구코드 → 대표코드 매핑 (같은 실물이 두 코드로 등록된 경우)
   DEBUG_SHEET: '_API디버그',
   DATA_START_ROW: 3,
 
@@ -112,12 +113,202 @@ function onOpen() {
       .addItem('창고 목록 새로고침 (드롭다운 갱신)', 'refreshWarehouseList')
       .addItem('지점 재고탭 생성', 'createBranchStockTab')
       .addItem('재고 탭 이름 정리 (재고 → 재고_부산점)', 'renameLegacyStockTab'))
+    .addSubMenu(SpreadsheetApp.getUi().createMenu('⑨ 코드매핑 (구코드↔신코드)')
+      .addItem('매핑 초안 자동 생성 / 열기', 'buildCodeMapping')
+      .addItem('재고 탭에 매핑 적용 (구코드 행 합치기)', 'applyCodeMappingToStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
     .addItem('⚙ API 설정', 'setupApiKeys')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('(구) 날짜탭 방식')
       .addItem('오늘 탭 생성', 'createTodayTab')
       .addItem('마감재고만 다시 받기', 'refetchClosingStock'))
     .addToUi();
+}
+
+// ══════════════════════════ ⑨ 코드매핑 (구코드 → 대표코드) ══════════════════════════
+// 같은 실물 픽스쳐가 두 코드로 등록된 경우(예: PL001=ZMSN3008S(구) / PL051=ZMSN3008(신))
+// [코드매핑] 탭: A구코드 B대표코드 C품목명(구) D품목명(대표) E규격키 F확인(Y/N) G비고
+// 재고 탭은 대표코드 한 줄로 관리, 재고는 구+대표 합산, 전표는 구코드 재고부터 소진(선입선출)
+
+/** 품목명/코드에서 규격 키 추출 (제조사 규격 문자열, S 접미 등 버전표기 제거) */
+function specKey_(code, name) {
+  var cands = [String(code || ''), String(name || '')];
+  for (var i = 0; i < cands.length; i++) {
+    var c = cands[i].toUpperCase().replace('SW-', '').replace('_충남', '');
+    var m = c.match(/(TS3[MS]\d{4}[A-Z]{0,2}\d?|ZM[A-Z]{2}\d{4}S?|021\.\d{4}|IF\d{4}[A-Z]*|UF\(II\)N\d{4}SF|T01\d{4}S|DSSF[MR]\d{4}|FXS\d{4}|POF\d{4}|LW[SN]F\d{4}S?)/);
+    if (m) {
+      var k = m[1];
+      if (k.indexOf('ZM') === 0) k = k.replace(/S$/, '');   // ZMSN3008S ≈ ZMSN3008
+      return k;
+    }
+  }
+  return null;
+}
+
+/** [코드매핑] 탭 읽기 → { 구코드: 대표코드 } (확인=Y 인 행만) 와 { 대표코드: [구코드,...] } */
+function loadCodeMap_(ss) {
+  var toRep = {}, siblings = {};
+  var sheet = ss.getSheetByName(CONFIG.MAP_SHEET);
+  if (!sheet || sheet.getLastRow() < 3) return { toRep: toRep, siblings: siblings };
+  sheet.getRange(3, 1, sheet.getLastRow() - 2, 6).getValues().forEach(function (r) {
+    var old = String(r[0] || '').trim(), rep = String(r[1] || '').trim(), ok = String(r[5] || '').trim().toUpperCase();
+    if (!old || !rep || old === rep || ok !== 'Y') return;
+    toRep[old] = rep;
+    if (!siblings[rep]) siblings[rep] = [];
+    siblings[rep].push(old);
+  });
+  return { toRep: toRep, siblings: siblings };
+}
+
+/** 코드 → 대표코드 (매핑 없으면 자기 자신) */
+function repCode_(map, cd) { return map.toRep[cd] || cd; }
+
+/**
+ * [코드매핑] 탭 생성/갱신 — 품목 정보의 규격키가 같은 코드 묶음을 찾아 초안 작성.
+ * 대표코드 = 이름에 S 접미가 없는 쪽(신코드), 나머지 = 구코드. 사람이 F열 확인(Y) 후 적용됨.
+ * 기존 확인(Y) 행은 유지.
+ */
+function buildCodeMapping() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (!itemSheet) { ui.alert('[품목 정보] 탭이 없습니다.'); return; }
+
+  // 규격키 → [{code,name,cat}]
+  var groups = {};
+  itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    var code = String(r[3] || '').trim();
+    if (!code) return;
+    var cat = String(r[2] || '');
+    if (cat !== '픽스쳐' && !/^(PL|OS|TS|SW|POF|FXS|MG|DO|PDT|LW|DTS|021)/.test(code)) return;
+    var k = specKey_(code, r[4]);
+    if (!k) return;
+    if (!groups[k]) groups[k] = [];
+    groups[k].push({ code: code, name: String(r[4] || '').trim() });
+  });
+
+  // 기존 확인된 행 보존
+  var existing = {};
+  var sheet = ss.getSheetByName(CONFIG.MAP_SHEET);
+  if (sheet && sheet.getLastRow() > 2) {
+    sheet.getRange(3, 1, sheet.getLastRow() - 2, 7).getValues().forEach(function (r) {
+      if (r[0]) existing[String(r[0]).trim()] = r;
+    });
+  }
+
+  var out = [];
+  Object.keys(groups).sort().forEach(function (k) {
+    var g = groups[k];
+    if (g.length < 2) return;
+    // 대표: 이름이 규격키와 정확히 같은 것 우선 → 그 다음 'S' 접미 없는 것 → 그 외 마지막 코드
+    g.sort(function (a, b) {
+      var sa = (a.name.toUpperCase() === k ? 0 : /S$/i.test(a.name) ? 2 : 1);
+      var sb = (b.name.toUpperCase() === k ? 0 : /S$/i.test(b.name) ? 2 : 1);
+      return sa - sb || (a.code < b.code ? -1 : 1);
+    });
+    var rep = g[0];
+    g.slice(1).forEach(function (o) {
+      var ex = existing[o.code];
+      if (ex) { out.push([o.code, ex[1] || rep.code, o.name, rep.name, k, ex[5] || '', ex[6] || '']); return; }
+      // 확실한 케이스는 미리 Y: 플란(PL) 코드끼리 + 품목명이 대표명+'S' (구버전 표기)만 다른 경우
+      var sureS = /^PL\d/.test(o.code) && /^PL\d/.test(rep.code) && o.name.toUpperCase() === rep.name.toUpperCase() + 'S';
+      // 애매한 케이스: _1/_2 접미(구매건 분리) 또는 다른 접두(지점별 구매채널 분리 가능) → 사람 확인
+      var suffixed = /_\d+$/.test(o.code) || /_충남$/.test(o.code);
+      var note = sureS ? '자동 확인(플란 S접미 구버전) — 아니면 F열 비우기'
+               : suffixed ? '⚠ 접미 코드(구매건/지점 분리 가능) — 같은 재고로 합칠지 확인'
+               : '자동 초안 — 같은 실물이면 F열에 Y';
+      out.push([o.code, rep.code, o.name, rep.name, k, sureS ? 'Y' : '', note]);
+    });
+  });
+  // 수동으로 추가했던(자동 그룹에 없는) 기존 행도 유지
+  Object.keys(existing).forEach(function (old) {
+    if (!out.some(function (r) { return r[0] === old; })) out.push(existing[old].slice(0, 7));
+  });
+
+  if (!sheet) sheet = ss.insertSheet(CONFIG.MAP_SHEET, (ss.getSheetByName(CONFIG.SETTINGS_SHEET) || { getIndex: function () { return 1; } }).getIndex());
+  sheet.clear();
+  sheet.getRange(1, 1).setValue('구코드 → 대표코드 매핑. F열에 Y를 넣은 행만 적용됨. 대표코드 한 줄로 재고 합산, 전표는 구코드 재고부터 소진. 갱신: "⑨ 코드매핑 › 매핑 초안 자동 생성"');
+  sheet.getRange(2, 1, 1, 7).setValues([['구코드', '대표코드', '품목명(구)', '품목명(대표)', '규격키', '확인(Y)', '비고']]).setFontWeight('bold').setBackground('#e2f1ef');
+  if (out.length) {
+    sheet.getRange(3, 1, out.length, 7).setValues(out);
+    sheet.getRange(3, 6, out.length, 1).setBackground('#fff9c4').setHorizontalAlignment('center');
+  }
+  sheet.setFrozenRows(2);
+  sheet.setColumnWidths(3, 2, 200);
+  ss.setActiveSheet(sheet);
+  var confirmed = out.filter(function (r) { return String(r[5]).toUpperCase() === 'Y'; }).length;
+  ui.alert('[코드매핑] 초안 ' + out.length + '건 (확인됨 ' + confirmed + '건)\n' +
+    '· 같은 실물이 맞는 행은 F열에 Y 입력\n· 대표코드는 원하는 코드로 바꿔도 됨\n' +
+    '· 확인 후 "⑨ 코드매핑 › 재고 탭에 매핑 적용" 실행');
+}
+
+/**
+ * 재고 탭에서 구코드 행을 제거하고 대표코드 행만 남긴다.
+ * 대표코드 행이 없으면 구코드 행을 대표코드로 개명. 비고(S열)에 "합산: 구코드…" 표기.
+ */
+function applyCodeMappingToStockTab() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var map = loadCodeMap_(ss);
+  var reps = Object.keys(map.siblings);
+  if (!reps.length) { ui.alert('[코드매핑] 탭에 확인(Y)된 매핑이 없습니다. "매핑 초안 자동 생성" 후 F열에 Y를 입력하세요.'); return; }
+
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) return;
+  var codes = main.getRange(startRow, COL.CODE, n, 1).getValues().map(function (r) { return String(r[0] || '').trim(); });
+  var rowOf = {};
+  codes.forEach(function (c, i) { if (c) rowOf[c] = startRow + i; });
+
+  var toDelete = [], renamed = 0, noted = 0;
+  reps.forEach(function (rep) {
+    var olds = map.siblings[rep].filter(function (o) { return rowOf[o]; });
+    if (!olds.length) return;
+    if (!rowOf[rep]) {
+      // 대표코드 행이 없음 → 첫 구코드 행을 대표코드로 개명
+      var r0 = rowOf[olds[0]];
+      main.getRange(r0, COL.CODE).setValue(rep);
+      var repName = ss.getSheetByName(CONFIG.MAP_SHEET) ? lookupMapName_(ss, olds[0]) : '';
+      if (repName) main.getRange(r0, COL.NAME).setValue(repName);
+      rowOf[rep] = r0; renamed++;
+      olds = olds.slice(1);
+    }
+    olds.forEach(function (o) { toDelete.push(rowOf[o]); });
+    var note = '합산: ' + rep + '+' + map.siblings[rep].join('+');
+    main.getRange(rowOf[rep], COL.MEMO).setValue(note); noted++;
+  });
+  toDelete.sort(function (a, b) { return b - a; }).forEach(function (r) { main.deleteRow(r); });
+
+  ui.alert('✅ [' + b.name + '] 매핑 적용 완료\n· 구코드 행 삭제: ' + toDelete.length + '건\n· 대표코드로 개명: ' + renamed + '건\n· 비고에 합산 표기: ' + noted + '건\n\n' +
+    '이제 ① 아침 준비를 실행하면 대표코드 행에 구+신 재고가 합산되어 들어옵니다.');
+}
+
+function lookupMapName_(ss, oldCode) {
+  var sheet = ss.getSheetByName(CONFIG.MAP_SHEET);
+  if (!sheet || sheet.getLastRow() < 3) return '';
+  var rows = sheet.getRange(3, 1, sheet.getLastRow() - 2, 4).getValues();
+  for (var i = 0; i < rows.length; i++) if (String(rows[i][0]).trim() === oldCode) return String(rows[i][3] || '');
+  return '';
+}
+
+/**
+ * 전표 수량을 코드별로 분배: 구코드 재고(해당 창고)부터 소진 → 나머지 대표코드.
+ * balByCode: {code: qty(해당 창고)}, 반환 [{code, qty}]
+ */
+function splitQtyFifo_(map, rep, qty, balByCode) {
+  var out = [];
+  var remain = qty;
+  var olds = map.siblings[rep] || [];
+  olds.forEach(function (o) {
+    if (remain <= 0) return;
+    var avail = Math.max(0, Number(balByCode[o] || 0));
+    var take = Math.min(avail, remain);
+    if (take > 0) { out.push({ code: o, qty: take }); remain -= take; }
+  });
+  if (remain > 0) out.push({ code: rep, qty: remain });
+  return out;
 }
 
 // ══════════════════════════ ⑦ 사용안내 탭 ══════════════════════════
@@ -178,6 +369,14 @@ function buildGuideSheet() {
   add('2', '⑧ 지점 관리 › 창고 목록 새로고침', '이카운트 창고 전체를 받아 D~F열 드롭다운 갱신', 'step');
   add('3', '설정 탭에서 수술방·중앙공급실·보관창고 선택', '드롭다운에서 선택 (창고명이 이카운트와 정확히 같아야 함)', 'step');
   add('4', '⑧ 지점 관리 › 지점 재고탭 생성', '지점명 입력 → 지점 창고에 재고 있는 품목으로 재고_지점명 탭 자동 생성. 이후 인가량(E) 입력', 'step');
+  gap();
+
+  sec('▶ 코드매핑 (같은 픽스쳐가 구코드·신코드 두 개로 등록된 경우)');
+  add('규칙', '대표코드 한 줄로 관리, 재고는 구+신 합산', '예: PL051(ZMSN3008)이 대표, PL001(ZMSN3008S)은 구코드. 재고 탭에는 PL051 한 줄, 비고에 "합산: PL051+PL001"', 'line');
+  add('전표', '구코드 재고부터 소진 → 나머지 대표코드', '판매·이동 전표가 코드별로 자동 분할됨 (미리보기 품목명 뒤 [코드]로 표시). 구코드 재고가 0이 되면 자연히 신코드만 남음', 'line');
+  add('설정', '⑨ 코드매핑 › 매핑 초안 자동 생성', '품목명 규격이 같은 코드를 찾아 [코드매핑] 탭에 초안. F열에 Y를 넣은 행만 적용. 대표코드는 바꿔도 됨', 'line');
+  add('적용', '⑨ 코드매핑 › 재고 탭에 매핑 적용', '해당 지점 재고 탭에서 구코드 행 삭제·대표코드 행만 남김 (지점 탭마다 1회). 이후 ① 아침 준비부터 합산 반영', 'line');
+  add('추가', '새 구코드 발견 시', '[코드매핑] 탭에 행 추가(구코드·대표코드·Y) 후 "재고 탭에 매핑 적용" 재실행', 'line');
   gap();
 
   sec('▶ 문제가 생기면');
@@ -381,11 +580,15 @@ function createBranchStockTab() {
   var rows = ecountFetchInventory(Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd'));
   var whSet = {};
   [b.whCentral, b.whStorage, b.whSurgery].forEach(function (w) { whSet[normalize_(w)] = true; });
+  var map = loadCodeMap_(ss);
   var codes = {};
   rows.forEach(function (r) {
     var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
     var wh = normalize_(String(firstOf_(r, ['WH_DES']) || ''));
-    if (cd && whSet[wh] && Number(firstOf_(r, ['BAL_QTY']) || 0)) codes[cd] = firstOf_(r, ['PROD_DES']) || '';
+    if (cd && whSet[wh] && Number(firstOf_(r, ['BAL_QTY']) || 0)) {
+      var rep = repCode_(map, cd);   // 구코드는 대표코드 한 줄로
+      if (!codes[rep]) codes[rep] = (rep === cd ? firstOf_(r, ['PROD_DES']) : lookupMapName_(ss, cd)) || firstOf_(r, ['PROD_DES']) || '';
+    }
   });
   var codeList = Object.keys(codes).sort();
   if (!codeList.length) { ui.alert('해당 지점 창고에 재고가 있는 품목이 없습니다. [설정]의 창고 선택을 확인하세요.'); return; }
@@ -506,7 +709,8 @@ function morningPrep() {
   var today = new Date();
   var prevDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
   var rows = ecountFetchInventory(Utilities.formatDate(prevDate, 'Asia/Seoul', 'yyyyMMdd'));
-  var bal = pivotBalance_(rows, b);
+  var map = loadCodeMap_(ss);
+  var bal = pivotBalance_(rows, b, map);
 
   var startRow = CONFIG.DATA_START_ROW;
   var lastRow = main.getLastRow();
@@ -543,22 +747,29 @@ function morningPrep() {
     '이제 중앙공급실 실사값을 G열에 입력하세요. (실사 안 한 품목은 빈칸)');
 }
 
-/** API 응답 → 품목코드별 [중앙, 창고, 수술방] 잔고 (지점 창고 기준) */
-function pivotBalance_(rows, b) {
+/**
+ * API 응답 → 품목코드별 [중앙, 창고, 수술방] 잔고 (지점 창고 기준).
+ * map(코드매핑)이 있으면 구코드 재고를 대표코드로 합산. bal.__raw 에는 코드별 원본 잔고 유지.
+ */
+function pivotBalance_(rows, b, map) {
   var slotMap = {};
   slotMap[normalize_(b.whCentral)] = 0;
   slotMap[normalize_(b.whStorage)] = 1;
   slotMap[normalize_(b.whSurgery)] = 2;
-  var bal = {};
+  var bal = {}, raw = {};
   rows.forEach(function (r) {
     var cd = String(firstOf_(r, ['PROD_CD']) || '').trim();
     var qty = Number(firstOf_(r, ['BAL_QTY']) || 0);
     if (!cd || !qty) return;
     var slot = slotMap[normalize_(String(firstOf_(r, ['WH_DES']) || ''))];
     if (slot == null) return;
-    if (!bal[cd]) bal[cd] = [0, 0, 0];
-    bal[cd][slot] += qty;
+    if (!raw[cd]) raw[cd] = [0, 0, 0];
+    raw[cd][slot] += qty;
+    var rep = map ? repCode_(map, cd) : cd;
+    if (!bal[rep]) bal[rep] = [0, 0, 0];
+    bal[rep][slot] += qty;
   });
+  Object.defineProperty(bal, '__raw', { value: raw, enumerable: false });
   return bal;
 }
 
@@ -625,19 +836,46 @@ function makeSlipPreview() {
     });
   }
 
+  // 코드매핑: 대표코드 행의 수량을 구코드 재고부터 소진하도록 분배 (선입선출). 원본 코드별 재고는 오늘 기준 API
+  var map = loadCodeMap_(ss);
+  var hasMap = Object.keys(map.siblings).length > 0;
+  var raw = {};
+  if (hasMap) {
+    var balNow = pivotBalance_(ecountFetchInventory(ymdToday), b, map);
+    raw = balNow.__raw || {};
+  }
+  // slot: 0 중앙, 1 창고, 2 수술방 — 출고 원천 창고 기준으로 분배
+  function split(rep, qty, slot) {
+    if (!hasMap || !map.siblings[rep]) return [{ code: rep, qty: qty }];
+    var byCode = {};
+    Object.keys(raw).forEach(function (c) { byCode[c] = raw[c][slot]; });
+    return splitQtyFifo_(map, rep, qty, byCode);
+  }
+  function nameOf(cd, fallback) { return cd === fallback.code ? fallback.name : (fallback.name + ' [' + cd + ']'); }
+
   var out = [];
   data.forEach(function (r) {
-    var code = r[COL.CODE - 1], name = r[COL.NAME - 1];
+    var code = String(r[COL.CODE - 1] || '').trim(), name = r[COL.NAME - 1];
     if (!code) return;
     var sale = Number(r[COL.SALE - 1]) || 0;
     var need = Number(r[COL.NEED - 1]) || 0;
     var ret = Number(r[COL.RET - 1]) || 0;
+    var fb = { code: code, name: name };
     if (sale > 0) {
-      out.push([b.name, '판매', ymdPrev, b.whSurgery, '', code, name, sale, (itemInfo[code] || {}).price || 0, '대기', '']);
-      out.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, code, name, sale, '', '대기', '']);
+      // 판매(수술방 출고)·중앙→수술방 이동: 각각 해당 창고의 구코드 재고부터
+      split(code, sale, 2).forEach(function (p) {
+        out.push([b.name, '판매', ymdPrev, b.whSurgery, '', p.code, nameOf(p.code, fb), p.qty, (itemInfo[p.code] || itemInfo[code] || {}).price || 0, '대기', '']);
+      });
+      split(code, sale, 0).forEach(function (p) {
+        out.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+      });
     }
-    if (need > 0) out.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, code, name, need, '', '대기', '']);
-    if (ret > 0) out.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, code, name, ret, '', '대기', '']);
+    if (need > 0) split(code, need, 1).forEach(function (p) {
+      out.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+    });
+    if (ret > 0) split(code, ret, 0).forEach(function (p) {
+      out.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+    });
   });
 
   if (!out.length) { ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return; }
@@ -822,7 +1060,7 @@ function checkInventory() {
 
   var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
   var apiRows = ecountFetchInventory(ymd);
-  var bal = pivotBalance_(apiRows, b);
+  var bal = pivotBalance_(apiRows, b, loadCodeMap_(ss));
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
