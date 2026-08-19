@@ -132,6 +132,8 @@ function onOpen() {
       .addItem('실사 리스트 생성 (계열·사이즈 정렬)', 'buildCountSheet')
       .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
       .addSeparator()
+      .addItem('재고 탭 빈 중분류·거래처·품목명 채우기 (품목 정보 기준)', 'fillStockTabMaster')
+      .addSeparator()
       .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
       .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
@@ -753,6 +755,52 @@ function importAuthQtyToStockTab() {
     (missing.length ? '\n\n⚠ 재고 탭에 없는 코드 ' + missing.length + '건 (재고 0이라 시드에서 빠진 품목 — 필요하면 재고 탭에 행 추가):\n' + missing.slice(0, 15).join(', ') + (missing.length > 15 ? ' …' : '') : ''));
 }
 
+// ══════════════════════════ ⑩ 재고 탭 마스터 보강 ══════════════════════════
+
+/**
+ * 활성 지점 재고 탭의 빈 중분류(A)·거래처(B)·품목명(D)을 [품목 정보]에서 채운다.
+ * 코드매핑된 대표코드는 자기 코드 → 구코드 순으로 품목 정보를 찾는다. 기존 값은 덮어쓰지 않음.
+ */
+function fillStockTabMaster() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (!itemSheet) { ui.alert('[품목 정보] 탭이 없습니다.'); return; }
+  var info = {};
+  itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    var cd = String(r[3] || '').trim();
+    if (cd) info[cd] = { vendor: String(r[0] || '').trim(), cat: String(r[2] || '').trim(), name: String(r[4] || '').trim() };
+  });
+  var map = loadCodeMap_(ss);
+  function lookup(code) {
+    if (info[code]) return info[code];
+    var olds = map.siblings[code] || [];
+    for (var i = 0; i < olds.length; i++) if (info[olds[i]]) return info[olds[i]];
+    return null;
+  }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) return;
+  var rng = main.getRange(startRow, 1, n, 4);
+  var vals = rng.getValues();
+  var fCat = 0, fVen = 0, fName = 0, miss = [];
+  vals.forEach(function (r) {
+    var code = String(r[2] || '').trim();
+    if (!code) return;
+    var it = lookup(code);
+    if (!it) { miss.push(code); return; }
+    if (!String(r[0] || '').trim() && it.cat) { r[0] = it.cat; fCat++; }
+    if (!String(r[1] || '').trim() && it.vendor) { r[1] = it.vendor; fVen++; }
+    if (!String(r[3] || '').trim() && it.name) { r[3] = it.name; fName++; }
+  });
+  rng.setValues(vals);
+  ui.alert('✅ [' + b.name + '] 채움 — 중분류 ' + fCat + '건, 거래처 ' + fVen + '건, 품목명 ' + fName + '건' +
+    (miss.length ? '\n⚠ 품목 정보에 없는 코드 ' + miss.length + '건: ' + miss.slice(0, 12).join(', ') + (miss.length > 12 ? ' …' : '') : ''));
+}
+
 // ══════════════════════════ ⑩ 실사 리스트 (계열·사이즈 정렬) ══════════════════════════
 
 /**
@@ -791,9 +839,11 @@ function buildCountSheet() {
   if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
   var data = main.getRange(startRow, 1, n, 20).getValues();
 
-  var sizeInfo = {};
+  var sizeInfo = {}, catInfo = {};
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
-  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) { if (r[3]) sizeInfo[String(r[3]).trim()] = String(r[5] || ''); });
+  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    if (r[3]) { var cd = String(r[3]).trim(); sizeInfo[cd] = String(r[5] || ''); catInfo[cd] = String(r[2] || ''); }
+  });
 
   var items = [];
   data.forEach(function (r, i) {
@@ -802,7 +852,7 @@ function buildCountSheet() {
     var name = String(r[COL.NAME - 1] || '');
     var k = sizeKey_(name, sizeInfo[code]);
     items.push({
-      cat: String(r[COL.CAT - 1] || '기타'), series: k.series, dia: k.dia, len: k.len, code: code, name: name,
+      cat: String(r[COL.CAT - 1] || '').trim() || catInfo[code] || '기타', series: k.series, dia: k.dia, len: k.len, code: code, name: name,
       size: sizeInfo[code] || '', prev: r[COL.PREV - 1], count: r[COL.COUNT - 1], storage: r[COL.STORAGE - 1], surgery: r[COL.SURGERY - 1],
       srcRow: startRow + i
     });
