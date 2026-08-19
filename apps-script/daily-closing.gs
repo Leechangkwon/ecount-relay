@@ -61,8 +61,14 @@ var CONFIG = {
   TRANSFER_FROM_FIELD: 'WH_CD_F',
   TRANSFER_TO_FIELD: 'WH_CD_T',
 
-  USAGE_WINDOW_DAYS: 14, // 사용량(1일) 계산 기간
+  USAGE_WINDOW_DAYS: 30, // 일사용량 계산 기간 (최근 30일 판매)
+  USAGE_MIN_DAYS: 14,    // 일별기록이 이 일수 미만이면 Supabase 수불부(월 usage_qty÷30)로 대체
   ORDER_ROUND_UNIT: 5,   // 발주수량 반올림 단위
+  DEFAULT_COVER_DAYS: 4, // 발주 커버일수 기본값 (월·수·금 발주, 금→화 입고 = 4일치 필요)
+  ORDER_LOOKUP_DAYS_KEY: 'COVER_DAYS',
+  // Supabase (새 ERP 동기화 DB) — 수불부 사용량 대체 소스. 값은 ⚙ API 설정에서 스크립트 속성에 저장
+  SB_TABLE: 'stock_ledger_sync',
+  SB_BRANCH_NAME: { '부산점': '부산', '부평점': '부평', '일산점': '일산' }, // 시트 지점명 → DB branch_name
   ARCHIVE_KEEP_DAYS: 7   // 아카이브 시 남겨둘 최근 날짜 탭 일수
 };
 
@@ -83,15 +89,16 @@ var COL = {
   PURCHASE: 13,// M 구매입고 [입력]
   FAIL: 14,    // N 페일 [입력]
   USAGE: 15,   // O 사용량(1일) (자동: 일별기록 최근 14일 평균)
-  DAYS: 16,    // P 사용예정일 [입력]
-  REQ: 17,     // Q 필요수량 (수식 = O*P)
-  ORDER: 18,   // R 발주수량 (수식)
-  MEMO: 19     // S 비고
+  DAYS: 16,    // P 발주 커버일수 [입력] — 기본 4, 연휴 전엔 늘려서 발주
+  REQ: 17,     // Q 목표재고 (수식 = O*P)
+  ORDER: 18,   // R 발주수량 (수식 = MAX(0, Q − 중앙실재고 − 창고실재고, 창고인가량 − 창고실재고), 5단위 올림)
+  MEMO: 19,    // S 비고
+  WH_ALLOW: 20 // T 창고 인가량 [입력] — 발주 하한선(창고 최소 유지량)
 };
 var LOG_HEADERS = ['일자', '지점', '품목코드', '품목명', '전일중앙', '실사중앙', '판매', '부족수량',
   '창고실재고', '수술방실재고', '환입', '구매입고', '페일', '사용량1일', '발주수량', '전표번호', '저장시각'];
 // 설정 탭 열: A지점명 B판매거래처 C담당자코드 D수술방창고 E중앙공급실창고 F보관창고
-var SETTING_HEADERS = ['지점명', '판매거래처코드', '담당자코드', '수술방(사용창고)', '중앙공급실 창고', '보관창고(대창고)'];
+var SETTING_HEADERS = ['지점명', '판매거래처코드', '담당자코드', '수술방(사용창고)', '중앙공급실 창고', '보관창고(대창고)', '발주커버일수'];
 
 // ══════════════════════════ 메뉴 ══════════════════════════
 
@@ -116,6 +123,9 @@ function onOpen() {
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑨ 코드매핑 (구코드↔신코드)')
       .addItem('매핑 초안 자동 생성 / 열기', 'buildCodeMapping')
       .addItem('재고 탭에 매핑 적용 (구코드 행 합치기)', 'applyCodeMappingToStockTab'))
+    .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
+      .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
+      .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
     .addItem('⑦ API 연결 테스트', 'testApi')
     .addItem('⚙ API 설정', 'setupApiKeys')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('(구) 날짜탭 방식')
@@ -351,7 +361,7 @@ function buildGuideSheet() {
   add('H · I', '판매 · 부족수량 (수식)', '부족수량 = 인가량 − 실사 (0 미만이면 0)', 'line');
   add('J · K', '창고 실재고 · 수술방 실재고 (자동)', '참고용. 이카운트 실재고', 'line');
   add('L · M · N', '환입 · 구매입고 · 페일 (입력)', '있는 날만 입력', 'line');
-  add('O~R', '사용량(1일) · 사용예정일 · 필요수량 · 발주수량', '사용량은 일별기록 최근 14일 판매 평균(자동). 사용예정일(P)만 입력하면 필요·발주수량 자동(5단위)', 'line');
+  add('O~R · T', '일사용량 · 발주 커버일수 · 목표재고 · 발주수량 · 창고 인가량', '일사용량(O)=최근30일 판매÷30(자동, 초기엔 ERP 수불부 대체). 커버일수(P)=기본 4일(월·수·금 발주, 금→화 입고). 목표재고=O×P. 발주=MAX(목표−중앙−창고, 창고인가량−창고) 5단위 올림. 연휴 전엔 P를 늘려서 발주(다음날 자동 원복)', 'line');
   gap();
 
   sec('▶ 탭 설명');
@@ -428,10 +438,10 @@ function openSettings() {
     sheet.getRange(1, 1).setValue('지점별 설정 — 창고는 드롭다운에서 선택 (목록이 비었으면 "⑧ 지점 관리 > 창고 목록 새로고침" 실행). 재고탭 이름은 "재고_지점명" 형식으로 자동 연결됩니다.');
     sheet.getRange(2, 1, 1, SETTING_HEADERS.length).setValues([SETTING_HEADERS]).setFontWeight('bold');
     sheet.setFrozenRows(2);
-    sheet.getRange(3, 1, 3, 6).setValues([
-      ['부산점', '부산점', CONFIG.EMP_CD, CONFIG.DEFAULT_BRANCH.whSurgery, CONFIG.DEFAULT_BRANCH.whCentral, CONFIG.DEFAULT_BRANCH.whStorage],
-      ['일산점', '일산점', CONFIG.EMP_CD, '플란치과_일산점_수술방', '플란치과_일산점_중앙공급실(구매팀)', '플란치과_일산점_구매팀 창고'],
-      ['부평점', '부평점', CONFIG.EMP_CD, '', '', '']
+    sheet.getRange(3, 1, 3, 7).setValues([
+      ['부산점', '부산점', CONFIG.EMP_CD, CONFIG.DEFAULT_BRANCH.whSurgery, CONFIG.DEFAULT_BRANCH.whCentral, CONFIG.DEFAULT_BRANCH.whStorage, CONFIG.DEFAULT_COVER_DAYS],
+      ['일산점', '일산점', CONFIG.EMP_CD, '플란치과_일산점_수술방', '플란치과_일산점_중앙공급실(구매팀)', '플란치과_일산점_구매팀 창고', CONFIG.DEFAULT_COVER_DAYS],
+      ['부평점', '부평점', CONFIG.EMP_CD, '', '', '', CONFIG.DEFAULT_COVER_DAYS]
     ]);
     sheet.setColumnWidths(4, 3, 280);
     applyWhValidation_(ss, sheet);
@@ -495,15 +505,21 @@ function getBranches_(ss) {
   out[d.name] = { name: d.name, cust: d.cust, emp: d.emp, whSurgery: d.whSurgery, whCentral: d.whCentral, whStorage: d.whStorage };
   var sheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
   if (sheet && sheet.getLastRow() > 2) {
-    sheet.getRange(3, 1, sheet.getLastRow() - 2, 6).getValues().forEach(function (r) {
+    // G열(발주커버일수)이 없는 구버전 설정 탭이면 헤더 추가
+    if (String(sheet.getRange(2, 7).getValue()) !== '발주커버일수') {
+      sheet.getRange(2, 7).setValue('발주커버일수').setFontWeight('bold');
+    }
+    sheet.getRange(3, 1, sheet.getLastRow() - 2, 7).getValues().forEach(function (r) {
       var name = String(r[0] || '').trim();
       if (!name) return;
       out[name] = {
         name: name, cust: String(r[1] || name).trim(), emp: String(r[2] || CONFIG.EMP_CD).trim(),
-        whSurgery: String(r[3] || '').trim(), whCentral: String(r[4] || '').trim(), whStorage: String(r[5] || '').trim()
+        whSurgery: String(r[3] || '').trim(), whCentral: String(r[4] || '').trim(), whStorage: String(r[5] || '').trim(),
+        coverDays: Number(r[6]) > 0 ? Number(r[6]) : CONFIG.DEFAULT_COVER_DAYS
       };
     });
   }
+  out[d.name].coverDays = out[d.name].coverDays || CONFIG.DEFAULT_COVER_DAYS;
   return out;
 }
 
@@ -610,50 +626,124 @@ function createBranchStockTab() {
     '· 인가량(E열)은 지점 기준에 맞게 직접 입력하세요.\n· 이 탭을 연 상태로 ①~⑤ 메뉴를 실행하면 ' + bName + ' 기준으로 동작합니다.');
 }
 
-/** 재고탭 공통 틀 생성 (헤더/수식/서식) — data: 19열 배열. 기존 재고_ 탭들 바로 뒤에 배치 */
+/** 재고탭 공통 틀 생성 (헤더/수식/서식) — data: 19~20열 배열. 기존 재고_ 탭들 바로 뒤에 배치 */
 function buildStockTabFrame_(ss, tabName, data) {
   var pos = 1;
   ss.getSheets().forEach(function (s, i) { if (s.getName().indexOf('재고_') === 0) pos = i + 1; });
   var main = ss.insertSheet(tabName, pos);
+  writeStockHeaders_(main);
+  var n = data.length;
+  var startRow = CONFIG.DATA_START_ROW;
+  var padded = data.map(function (r) { var x = r.slice(0, 20); while (x.length < 20) x.push(''); return x; });
+  main.getRange(startRow, 1, n, 20).setValues(padded);
+  writeStockFormulas_(main, startRow, n);
+  return main;
+}
+
+/** 재고탭 1~2행 헤더 (기존 탭 갱신에도 사용) */
+function writeStockHeaders_(main) {
+  main.getRange(1, 1, 2, 20).clearContent();
   main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 (매일 실사)', '', '', '']]);
   main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고(자동)', '']]);
-  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주', '', '', '']]);
-  main.getRange(2, 1, 1, 19).setValues([[
-    '중분류', '거래처', '품목코드', '품목명', '인가량',
+  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주 (사용량 기반)', '', '', '']]);
+  main.getRange(2, 1, 1, 20).setValues([[
+    '중분류', '거래처', '품목코드', '품목명', '공급실 인가량',
     '전일재고\n(자동)', '오늘 실사\n입력칸', '판매\n(수식)', '부족수량\n(수식)',
     '창고 실재고\n(자동)', '수술방 실재고\n(자동)',
     '환입\n입력칸', '구매입고\n입력칸', '페일\n입력칸',
-    '사용량(1일)\n(자동)', '사용예정일\n입력칸', '필요수량\n(수식)', '발주수량\n(수식)', '비고'
+    '일사용량\n(자동·최근30일)', '발주 커버일수\n입력칸(기본4)', '목표재고\n(수식)', '발주수량\n(수식)', '비고', '창고 인가량\n(발주 하한)'
   ]]);
-  main.getRange(1, 1, 2, 19).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle');
+  main.getRange(1, 1, 2, 20).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle');
   main.setFrozenRows(2);
   main.setFrozenColumns(4);
+}
 
-  var n = data.length;
-  var startRow = CONFIG.DATA_START_ROW;
-  main.getRange(startRow, 1, n, 19).setValues(data);
-
+/** 재고탭 수식/서식 (기존 탭 갱신에도 사용) */
+function writeStockFormulas_(main, startRow, n) {
+  var U = CONFIG.ORDER_ROUND_UNIT;
   var fSale = [], fNeed = [], fReq = [], fOrder = [];
   for (var i = 0; i < n; i++) {
     var r = startRow + i;
     fSale.push(['=IF($G' + r + '="","",$F' + r + '-$G' + r + ')']);
     fNeed.push(['=IF($G' + r + '="","",MAX(0,N($E' + r + ')-$G' + r + '))']);
+    // 목표재고 = 일사용량 × 커버일수 (지점 전체: 중앙+창고 기준)
     fReq.push(['=IF(OR($O' + r + '="",$P' + r + '=""),"",$O' + r + '*$P' + r + ')']);
-    fOrder.push(['=IF($Q' + r + '="","",MAX(0,ROUNDDOWN(($Q' + r + '-N($G' + r + ')-N($J' + r + '))/' + CONFIG.ORDER_ROUND_UNIT + ',0)*' + CONFIG.ORDER_ROUND_UNIT + '))']);
+    // 발주 = MAX( 목표재고 − (중앙실재고+창고실재고), 창고인가량 − 창고실재고 ) 를 발주단위로 올림. 둘 다 없으면 빈칸
+    fOrder.push(['=IF(AND($Q' + r + '="",$T' + r + '=""),"",MAX(0,CEILING(MAX(N($Q' + r + ')-N($F' + r + ')-N($J' + r + '),N($T' + r + ')-N($J' + r + '))/' + U + ',1)*' + U + '))']);
   }
   main.getRange(startRow, COL.SALE, n, 1).setFormulas(fSale);
   main.getRange(startRow, COL.NEED, n, 1).setFormulas(fNeed);
   main.getRange(startRow, COL.REQ, n, 1).setFormulas(fReq);
   main.getRange(startRow, COL.ORDER, n, 1).setFormulas(fOrder);
 
-  var yellow = '#fff9c4', gray = '#f0f0f0';
-  [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS].forEach(function (c) {
+  var yellow = '#fff9c4', gray = '#f0f0f0', blue = '#e3f2fd';
+  [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground(yellow);
   });
   [COL.PREV, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground(gray);
   });
-  return main;
+  main.getRange(startRow, COL.ORDER, n, 1).setBackground(blue).setFontWeight('bold');
+}
+
+/**
+ * [인가량_지점명] 탭 (A품목코드 B품목명 C창고인가량 D공급실인가량) → 활성 지점 재고탭의 E(공급실 인가량)·T(창고 인가량)에 반영.
+ * 코드매핑이 있으면 구코드 인가량은 대표코드에 합산. 재고탭에 없는 코드는 결과 팝업에 표시.
+ */
+function importAuthQtyToStockTab() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var src = ss.getSheetByName('인가량_' + b.name);
+  if (!src) { ui.alert('[인가량_' + b.name + '] 탭이 없습니다.\n인가량 파일의 시트를 이 이름으로 붙여넣으세요 (A품목코드 B품목명 C창고인가량 D공급실인가량, 1행 헤더).'); return; }
+  var map = loadCodeMap_(ss);
+  var wh = {}, cen = {};
+  src.getDataRange().getValues().slice(1).forEach(function (r) {
+    var cd = String(r[0] || '').trim();
+    if (!cd) return;
+    var rep = repCode_(map, cd);
+    if (r[2] !== '' && r[2] != null && !isNaN(Number(r[2]))) wh[rep] = (wh[rep] || 0) + Number(r[2]);
+    if (r[3] !== '' && r[3] != null && !isNaN(Number(r[3]))) cen[rep] = (cen[rep] || 0) + Number(r[3]);
+  });
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  var codes = main.getRange(startRow, COL.CODE, n, 1).getValues().map(function (r) { return String(r[0] || '').trim(); });
+  var eVals = main.getRange(startRow, COL.ALLOW, n, 1).getValues();
+  var tVals = main.getRange(startRow, COL.WH_ALLOW, n, 1).getValues();
+  var hitE = 0, hitT = 0, seen = {};
+  codes.forEach(function (cd, i) {
+    if (!cd) return;
+    seen[cd] = true;
+    if (cen[cd] != null) { eVals[i][0] = cen[cd]; hitE++; }
+    if (wh[cd] != null) { tVals[i][0] = wh[cd]; hitT++; }
+  });
+  main.getRange(startRow, COL.ALLOW, n, 1).setValues(eVals);
+  main.getRange(startRow, COL.WH_ALLOW, n, 1).setValues(tVals);
+  var missing = Object.keys(cen).concat(Object.keys(wh)).filter(function (c, i, a) { return a.indexOf(c) === i && !seen[c]; });
+  ui.alert('✅ [' + b.name + '] 인가량 반영\n· 공급실 인가량(E): ' + hitE + '건\n· 창고 인가량(T): ' + hitT + '건' +
+    (missing.length ? '\n\n⚠ 재고 탭에 없는 코드 ' + missing.length + '건 (재고 0이라 시드에서 빠진 품목 — 필요하면 재고 탭에 행 추가):\n' + missing.slice(0, 15).join(', ') + (missing.length > 15 ? ' …' : '') : ''));
+}
+
+/** 기존 재고탭을 새 발주 블록(일사용량·커버일수·목표재고·발주수량·창고인가량)으로 갱신 — 데이터는 유지 */
+function upgradeStockTabLayout() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+  writeStockHeaders_(main);
+  writeStockFormulas_(main, startRow, n);
+  // 커버일수(P) 비어 있으면 지점 기본값으로
+  var cover = b.coverDays || CONFIG.DEFAULT_COVER_DAYS;
+  var pVals = main.getRange(startRow, COL.DAYS, n, 1).getValues().map(function (r) { return [r[0] === '' || r[0] == null ? cover : r[0]]; });
+  main.getRange(startRow, COL.DAYS, n, 1).setValues(pVals);
+  main.setColumnWidth(COL.WH_ALLOW, 90);
+  ui.alert('✅ [' + b.name + '] 발주 블록 갱신 완료\n· O 일사용량(자동) · P 커버일수(기본 ' + cover + ') · Q 목표재고 · R 발주수량 · T 창고 인가량\n· ① 아침 준비를 실행하면 일사용량이 채워집니다.');
 }
 
 // ══════════════════════════ ⓪ 새 구조 초기 구축 ══════════════════════════
@@ -718,8 +808,9 @@ function morningPrep() {
   if (n <= 0) { ui.alert('[재고] 탭에 품목이 없습니다.'); return; }
   var codes = main.getRange(startRow, COL.CODE, n, 1).getValues();
 
-  // 사용량(1일): 일별기록 최근 USAGE_WINDOW_DAYS일 판매 합계 ÷ 실사일수 (해당 지점 기록만)
-  var usage = computeUsage_(ss, b.name);
+  // 일사용량: 일별기록 최근 30일 판매 합계 ÷ 30 (기록 14일 미만이면 Supabase 수불부 월 usage_qty ÷ 30 대체)
+  var usageRes = computeDailyUsage_(ss, b, map);
+  var usage = usageRes.usage;
 
   var prevVals = [], storVals = [], surgVals = [], usageVals = [];
   codes.forEach(function (row) {
@@ -735,6 +826,10 @@ function morningPrep() {
   main.getRange(startRow, COL.SURGERY, n, 1).setValues(surgVals);
   main.getRange(startRow, COL.USAGE, n, 1).setValues(usageVals);
 
+  // 발주 커버일수(P) 지점 기본값으로 리셋 (연휴 전에 늘렸던 값을 매일 원복)
+  var cover = b.coverDays || CONFIG.DEFAULT_COVER_DAYS;
+  main.getRange(startRow, COL.DAYS, n, 1).setValues(codes.map(function (row) { return [row[0] ? cover : '']; }));
+
   // 입력칸 초기화 (실사/환입/구매입고/페일)
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL].forEach(function (c) {
     main.getRange(startRow, c, n, 1).clearContent();
@@ -742,9 +837,85 @@ function morningPrep() {
 
   ui.alert('✅ [' + b.name + '] 아침 준비 완료 (기준일: ' + Utilities.formatDate(prevDate, 'Asia/Seoul', 'M/d') + ' 마감)\n' +
     '· 전일 중앙재고 / 창고·수술방 실재고 자동 입력\n' +
-    '· 실사·환입·구매입고·페일 입력칸 초기화\n' +
-    '· 사용량(1일): 일별기록 최근 ' + CONFIG.USAGE_WINDOW_DAYS + '일 기준 재계산\n\n' +
-    '이제 중앙공급실 실사값을 G열에 입력하세요. (실사 안 한 품목은 빈칸)');
+    '· 실사·환입·구매입고·페일 입력칸 초기화, 발주 커버일수 ' + cover + '일로 리셋\n' +
+    '· 일사용량: ' + usageRes.source + '\n\n' +
+    '이제 중앙공급실 실사값을 G열에 입력하세요. (실사 안 한 품목은 빈칸)\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
+}
+
+/**
+ * 일사용량 계산.
+ *  1) 일별기록 해당 지점 최근 USAGE_WINDOW_DAYS(30)일 판매 합계 ÷ 30 — 기록일수가 USAGE_MIN_DAYS 이상일 때
+ *  2) 아니면 Supabase stock_ledger_sync 최근 마감월 usage_qty ÷ 30 (지점·품목코드, 코드매핑으로 대표코드 합산)
+ * 반환 { usage: {code: 일사용량}, source: 설명 }
+ */
+function computeDailyUsage_(ss, b, map) {
+  var W = CONFIG.USAGE_WINDOW_DAYS;
+  var log = ss.getSheetByName(CONFIG.LOG_SHEET);
+  var sum = {}, daysSet = {};
+  if (log && log.getLastRow() > 1) {
+    var hasBranchCol = String(log.getRange(1, 2).getValue()) === '지점';
+    var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - W);
+    var cutoffYmd = Utilities.formatDate(cutoff, 'Asia/Seoul', 'yyyyMMdd');
+    log.getRange(2, 1, log.getLastRow() - 1, 7).getValues().forEach(function (r) {
+      var ymd = String(r[0]);
+      if (ymd < cutoffYmd) return;
+      var branch = hasBranchCol ? String(r[1]) : CONFIG.DEFAULT_BRANCH.name;
+      if (branch !== b.name) return;
+      var cd = String(r[hasBranchCol ? 2 : 1]);
+      var saleVal = r[hasBranchCol ? 6 : 5];
+      var sale = Number(saleVal);
+      if (!cd || saleVal === '' || isNaN(sale)) return;
+      var rep = map ? repCode_(map, cd) : cd;
+      sum[rep] = (sum[rep] || 0) + sale;
+      daysSet[ymd] = true;
+    });
+  }
+  var nDays = Object.keys(daysSet).length;
+  var usage = {};
+  if (nDays >= CONFIG.USAGE_MIN_DAYS) {
+    Object.keys(sum).forEach(function (cd) { usage[cd] = Math.round(sum[cd] / W * 100) / 100; });
+    return { usage: usage, source: '일별기록 최근 ' + W + '일 판매 ÷ ' + W + ' (기록 ' + nDays + '일)' };
+  }
+  // 대체: Supabase 수불부
+  try {
+    var sb = fetchSupabaseUsage_(b.name);
+    if (sb && sb.rows.length) {
+      sb.rows.forEach(function (r) {
+        var rep = map ? repCode_(map, r.item_code) : r.item_code;
+        usage[rep] = (usage[rep] || 0) + Number(r.usage_qty || 0);
+      });
+      Object.keys(usage).forEach(function (cd) { usage[cd] = Math.round(usage[cd] / 30 * 100) / 100; });
+      return { usage: usage, source: 'ERP 수불부 ' + sb.yearMonth + ' 사용량 ÷ 30 (일별기록 ' + nDays + '일뿐이라 대체)' };
+    }
+  } catch (e) {
+    return { usage: {}, source: '⚠ 계산 불가 — 일별기록 ' + nDays + '일, ERP 수불부 조회 실패: ' + String(e.message).slice(0, 80) };
+  }
+  return { usage: {}, source: '⚠ 계산 불가 — 일별기록 ' + nDays + '일뿐, ERP 수불부에 해당 지점 데이터 없음' };
+}
+
+/** Supabase stock_ledger_sync에서 지점의 최근 마감월 usage_qty 조회 */
+function fetchSupabaseUsage_(branchName) {
+  var p = PropertiesService.getScriptProperties();
+  var url = p.getProperty('SB_URL'), key = p.getProperty('SB_KEY');
+  if (!url || !key) throw new Error('Supabase 미설정 ("⚙ API 설정"에서 SB_URL/SB_KEY 입력)');
+  var dbBranch = CONFIG.SB_BRANCH_NAME[branchName] || branchName.replace(/점$/, '');
+  var hdr = { 'apikey': key, 'Authorization': 'Bearer ' + key };
+  // 최근 마감월
+  var r1 = UrlFetchApp.fetch(url + '/rest/v1/' + CONFIG.SB_TABLE + '?select=year_month&branch_name=eq.' + encodeURIComponent(dbBranch) + '&order=year_month.desc&limit=1', { headers: hdr, muteHttpExceptions: true });
+  if (r1.getResponseCode() !== 200) throw new Error('Supabase HTTP ' + r1.getResponseCode());
+  var ymRows = JSON.parse(r1.getContentText());
+  if (!ymRows.length) return { yearMonth: null, rows: [] };
+  var ym = ymRows[0].year_month;
+  var rows = [], offset = 0;
+  while (true) {
+    var r2 = UrlFetchApp.fetch(url + '/rest/v1/' + CONFIG.SB_TABLE + '?select=item_code,usage_qty&branch_name=eq.' + encodeURIComponent(dbBranch) + '&year_month=eq.' + ym + '&offset=' + offset + '&limit=1000', { headers: hdr, muteHttpExceptions: true });
+    if (r2.getResponseCode() !== 200) throw new Error('Supabase HTTP ' + r2.getResponseCode());
+    var chunk = JSON.parse(r2.getContentText());
+    rows = rows.concat(chunk);
+    if (chunk.length < 1000) break;
+    offset += 1000;
+  }
+  return { yearMonth: ym, rows: rows };
 }
 
 /**
@@ -1368,7 +1539,9 @@ function setupApiKeys() {
   var props = PropertiesService.getScriptProperties();
   [
     'RELAY_URL|중계 서버 주소 (예: https://ecount-relay.onrender.com)',
-    'RELAY_TOKEN|중계 토큰 (서버 ECOUNT_RELAY_TOKEN과 동일 값)'
+    'RELAY_TOKEN|중계 토큰 (서버 ECOUNT_RELAY_TOKEN과 동일 값)',
+    'SB_URL|Supabase URL (새 ERP 수불부 — 일사용량 대체 소스, 예: https://xxxx.supabase.co)',
+    'SB_KEY|Supabase anon key'
   ].forEach(function (spec) {
     var key = spec.split('|')[0], label = spec.split('|')[1];
     var cur = props.getProperty(key);
