@@ -108,7 +108,7 @@ var SETTING_HEADERS = ['지점명', '판매거래처코드', '담당자코드', 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('⚡ 재고마감')
-    .addItem('① 아침 준비 (전일재고 갱신+초기화)', 'morningPrep')
+    .addItem('① 아침 준비 (전일재고 갱신·신규품목 자동 추가·초기화)', 'morningPrep')
     .addItem('② 마감 전표 미리보기', 'makeSlipPreview')
     .addItem('③ 전표 전송', 'sendSlips')
     .addItem('④ 재고 재점검', 'checkInventory')
@@ -129,9 +129,9 @@ function onOpen() {
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
       .addItem('발주서 양식 생성 (_발주서 탭 → 이카운트 웹자료올리기)', 'buildPurchaseOrderSheet')
       .addSeparator()
-      .addItem('실사 리스트 생성 (계열·사이즈 정렬) — ① 아침 준비 시 자동', 'buildCountSheet')
+      .addItem('실사 리스트 출력용 생성 (필요할 때만)', 'buildCountSheet')
       .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
-      .addItem('재고 탭 자체를 실사 순서로 정렬 (1회)', 'sortStockTabLikeCount')
+      .addItem('재고 탭을 실사 순서로 재정렬', 'sortStockTabLikeCount')
       .addSeparator()
       .addItem('재고 탭 빈 중분류·거래처·품목명 채우기 (품목 정보 기준)', 'fillStockTabMaster')
       .addItem('품목 정보 최신화 (이카운트 품목조회 API)', 'refreshItemMaster')
@@ -357,8 +357,8 @@ function buildGuideSheet() {
 
   sec('▶ 매일 사용법 (지점 담당자)');
   add('순서', '할 일', '설명', 'head');
-  add('1', '⚡ 재고마감 › ① 아침 준비', '전일 마감 기준 중앙공급실 재고(F열)·창고/수술방 실재고(J·K열)를 이카운트에서 받아 채우고 입력칸을 비움', 'step');
-  add('2', '중앙공급실 실사 → G열(노란칸)에 입력', '센 품목만 숫자 입력. 안 센 품목은 빈칸으로(판매 계산 제외). 환입·구매입고·페일은 L·M·N열. 판매(H)·부족수량(I)은 자동', 'step');
+  add('1', '⚡ 재고마감 › ① 아침 준비', '전일 마감 기준 중앙공급실 재고(F열)·창고/수술방 실재고(J·K열)를 이카운트에서 받아 채우고 입력칸을 비움. 이카운트에 새로 생긴 품목은 자동으로 행 추가·정보 채움·실사 순서 정렬까지 됨', 'step');
+  add('2', '중앙공급실 실사 → G열(노란칸)에 입력', '재고 탭이 실사 순서로 정렬돼 있어 위에서부터 그대로 입력. 센 품목만 숫자 입력, 안 센 품목은 빈칸(판매 계산 제외). 환입·구매입고·페일은 L·M·N열. 판매(H)·부족수량(I)은 자동. 종이 실사지가 필요하면 ⑩ › 실사 리스트 출력용 생성', 'step');
   add('3', '② 마감 전표 미리보기 → _전표전송 탭 검토', '판매·중앙→수술방 이동은 전일자, 창고→중앙 보충 이동은 오늘 날짜. 수량 수정 가능, 빼려면 행 삭제', 'step');
   add('4', '③ 전표 전송 → 확인창 "예"', '이카운트에 판매·창고이동 전표 생성. 전표번호는 _전표전송 K열. 같은 전표는 두 번 안 나감', 'step');
   add('5', '④ 재고 재점검', '이카운트 실재고를 다시 받아 기대재고와 대조. 차이 품목만 _재고점검 탭에 표시. 0건이면 정상', 'step');
@@ -851,14 +851,23 @@ function ecountQuery_(kind, payload, pathOverride) {
 function refreshItemMaster() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var sheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
-  if (!sheet) { ui.alert('[품목 정보] 탭이 없습니다.'); return; }
+  try {
+    var res = refreshItemMasterCore_(ss);
+    ui.alert('✅ 품목 정보 최신화 — API 품목 ' + res.total + '건' + (res.capped ? ' (⚠ 1만 건 상한 — 일부 누락 가능)' : '') +
+      '\n· 기존 행 갱신 ' + res.updated + '건\n· 신규 추가 ' + res.added.length + '건' +
+      (res.added.length ? '\n\n신규 예: ' + res.added.slice(0, 8).join(', ') : ''));
+  } catch (e) {
+    ui.alert('품목조회 실패: ' + e.message + '\n"_API디버그" 시트에서 원본 응답을 확인하세요.');
+  }
+}
 
-  var data;
-  try { data = ecountQuery_('products', {}); }
-  catch (e) { ui.alert('품목조회 실패: ' + e.message + '\n"_API디버그" 시트에서 원본 응답을 확인하세요.'); return; }
+/** 품목 정보 최신화 코어 (ui 없음). 반환 {total, updated, added:[코드], capped} */
+function refreshItemMasterCore_(ss) {
+  var sheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (!sheet) throw new Error('[품목 정보] 탭이 없습니다.');
+  var data = ecountQuery_('products', {});
   var rows = (data && (data.Result || data.Results || (data.Datas && data.Datas.Result))) || [];
-  if (!rows.length) { ui.alert('품목조회 응답에 데이터가 없습니다. "_API디버그" 시트를 확인하세요.\n응답 키: ' + Object.keys(data || {}).join(', ')); return; }
+  if (!rows.length) throw new Error('품목조회 응답에 데이터가 없습니다.');
 
   // 품목조회 응답(확인됨): PROD_CD, PROD_DES, SIZE_DES, UNIT, IN_PRICE, CUST(거래처코드), CLASS_CD(대분류코드), CLASS_CD2(중분류코드)
   // 코드→이름은 응답에 없으므로 기존 [품목 정보]에서 학습 (같은 코드를 가진 기존 품목의 이름 중 최빈값)
@@ -919,9 +928,7 @@ function refreshItemMaster() {
   });
   if (added.length) sheet.getRange(sheet.getLastRow() + 1, 1, added.length, 8).setValues(added);
 
-  ui.alert('✅ 품목 정보 최신화 — API 품목 ' + Object.keys(byCode).length + '건' + (rows.length >= 10000 ? ' (⚠ 1만 건 상한 — 일부 누락 가능)' : '') + '\n· 기존 행 갱신 ' + updated + '건\n· 신규 추가 ' + added.length + '건' +
-    (added.length ? '\n\n신규 예: ' + added.slice(0, 8).map(function (a) { return a[3]; }).join(', ') : '') +
-    '\n\n이어서 재고 탭에서 "빈 중분류·거래처·품목명 채우기"를 실행하세요.');
+  return { total: Object.keys(byCode).length, updated: updated, added: added.map(function (a) { return a[3]; }), capped: rows.length >= 10000 };
 }
 
 // ══════════════════════════ ⑩ 재고 탭 마스터 보강 ══════════════════════════
@@ -935,8 +942,15 @@ function fillStockTabMaster() {
   var ui = SpreadsheetApp.getUi();
   var b;
   try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var res = fillStockTabMasterCore_(ss, b);
+  ui.alert('✅ [' + b.name + '] 채움 — 중분류 ' + res.fCat + '건, 거래처 ' + res.fVen + '건, 품목명 ' + res.fName + '건' +
+    (res.miss.length ? '\n⚠ 품목 정보에 없는 코드 ' + res.miss.length + '건: ' + res.miss.slice(0, 12).join(', ') + (res.miss.length > 12 ? ' …' : '') : ''));
+}
+
+/** 빈 중분류/거래처/품목명 채움 코어 (ui 없음). 반환 {fCat, fVen, fName, miss} */
+function fillStockTabMasterCore_(ss, b) {
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
-  if (!itemSheet) { ui.alert('[품목 정보] 탭이 없습니다.'); return; }
+  if (!itemSheet) return { fCat: 0, fVen: 0, fName: 0, miss: [] };
   var info = {};
   itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
     var cd = String(r[3] || '').trim();
@@ -952,7 +966,7 @@ function fillStockTabMaster() {
   var main = b.sheet;
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  if (n <= 0) return;
+  if (n <= 0) return { fCat: 0, fVen: 0, fName: 0, miss: [] };
   var rng = main.getRange(startRow, 1, n, 4);
   var vals = rng.getValues();
   var fCat = 0, fVen = 0, fName = 0, miss = [];
@@ -966,8 +980,7 @@ function fillStockTabMaster() {
     if (!String(r[3] || '').trim() && it.name) { r[3] = it.name; fName++; }
   });
   rng.setValues(vals);
-  ui.alert('✅ [' + b.name + '] 채움 — 중분류 ' + fCat + '건, 거래처 ' + fVen + '건, 품목명 ' + fName + '건' +
-    (miss.length ? '\n⚠ 품목 정보에 없는 코드 ' + miss.length + '건: ' + miss.slice(0, 12).join(', ') + (miss.length > 12 ? ' …' : '') : ''));
+  return { fCat: fCat, fVen: fVen, fName: fName, miss: miss };
 }
 
 // ══════════════════════════ ⑩ 실사 리스트 (계열·사이즈 정렬) ══════════════════════════
@@ -975,7 +988,7 @@ function fillStockTabMaster() {
 /**
  * 품목명/규격에서 정렬키 추출: { series(계열문자), dia(직경), len(길이) }
  *  ZMTR4011 → ZMTR / 4.0 / 11     TS3S4508BV5 → TS3S / 4.5 / 8     ST4507C → ST / 4.5 / 7
- *  STHA405R → STHA / 4 / 5 (직경1+높이2)   BLT Ø4.1mm RC, SLA® 8mm → BLT / 4.1 / 8
+ *  STHA405R → STHA-R / 4.0 / 5 (직경2+높이1, M=mini/R=regular 계열 분리)   BLT Ø4.1mm RC, SLA® 8mm → BLT / 4.1 / 8
  *  IF5507DC → IF / 5.5 / 7    021.5508 → 021 / 5.5 / 8 (앞 2자리 직경코드)
  */
 function sizeKey_(name, size) {
@@ -995,9 +1008,18 @@ function sizeKey_(name, size) {
       var surfName = { A: 'SOI', B: 'BA', C: 'CA' }[surf];
       series = surfName ? 'TS3-' + surfName : 'TS3';
     }
+    // 플란 ZEST 신형(PL150~): ZESTR/ZESTW는 직경으로 구분되므로 합치고, 끝의 C1/C2 라인을 제품군으로 분리
+    if (/^ZEST[RW]$/.test(series)) {
+      var lineM = s.match(/C(\d)\s*$/i);
+      series = 'ZEST' + (lineM ? '-C' + lineM[1] : '');
+    }
     return { series: series, dia: Number(m[2]) / 10, len: Number(m[3]) };
   }
-  // 3) 계열문자 + 3자리 (직경1 + 높이2)  예: STHA405R, AROHAN 309, AROCSR 3705(4자리→규칙2)
+  // 3-0) 메가젠 STHA 힐링: STHA + 직경2 + 높이1 + M(mini)/R(regular)  예: STHA405M, STHA453R
+  //      M/R은 별개 제품군이므로 STHA-M / STHA-R 계열로 분리 (mini 먼저, regular 다음)
+  m = s.match(/^STHA\s*(\d{2})(\d)\s*([MR])/i);
+  if (m) return { series: 'STHA-' + m[3].toUpperCase(), dia: Number(m[1]) / 10, len: Number(m[2]) };
+  // 3) 계열문자 + 3자리 (직경1 + 높이2)  예: AROHAN 309, AROCSR 3705(4자리→규칙2)
   m = s.match(/^([A-Za-z]+(?:\s*-\s*[A-Za-z]+)?)\s*(\d)(\d{2})(?![\d])/);
   if (m) return { series: m[1].replace(/\s+/g, '').toUpperCase(), dia: Number(m[2]), len: Number(m[3]) };
   // 4) 코드형 021.5508 (스트라우만 SLA)
@@ -1017,16 +1039,22 @@ function buildCountSheet() {
     'I열에 실사값 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"을 누르면 재고 탭 G열로 옮겨집니다.');
 }
 
-/** 재고 탭 자체를 실사 순서(중분류→계열→Ø→L)로 정렬 — 1회 실행, 데이터·수식 유지 */
+/** 재고 탭 자체를 실사 순서(중분류→계열→Ø→L)로 정렬 (메뉴) — 데이터·수식 유지 */
 function sortStockTabLikeCount() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
   var b;
   try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var n = sortStockRowsCore_(ss, b);
+  ui.alert('✅ [' + b.name + '] 재고 탭을 실사 순서로 정렬했습니다 (' + n + '품목). 이제 재고 탭에서 바로 순서대로 실사 입력 가능.');
+}
+
+/** 재고 탭 정렬 코어 (ui 없음). 정렬 후 수식·스타일 재적용, 정렬한 품목 수 반환 */
+function sortStockRowsCore_(ss, b) {
   var main = b.sheet;
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  if (n <= 0) return;
+  if (n <= 0) return 0;
   var sizeInfo = {}, catInfo = {};
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
   if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
@@ -1042,8 +1070,8 @@ function sortStockTabLikeCount() {
   keyed.sort(countCompare_);
   // 수식 열은 다시 써야 하므로 값만 정렬 후 수식 재적용
   rng.setValues(keyed.map(function (x) { return x.r; }));
-  writeStockFormulas_(main, startRow, n);
-  ui.alert('✅ [' + b.name + '] 재고 탭을 실사 순서로 정렬했습니다 (' + n + '품목). 이제 재고 탭에서 바로 순서대로 실사 입력 가능.');
+  writeStockFormulas_(main, startRow, n);  // 내부에서 styleStockRows_ 재적용
+  return n;
 }
 
 var COUNT_CAT_ORDER = ['픽스쳐', '힐링', '커버스크류', '코핑', 'MUA', '스캔바디', '랩아날로그', '뼈이식재', '멤브레인', '페일픽스쳐'];
@@ -1348,6 +1376,41 @@ function morningPrep() {
   if (n <= 0) { ui.alert('[재고] 탭에 품목이 없습니다.'); return; }
   var codes = main.getRange(startRow, COL.CODE, n, 1).getValues();
 
+  // ── 신규 품목 자동 온보딩: API 재고에 있는데 재고 탭에 없는 코드(대표코드 기준, 재고>0) ──
+  var existing = {};
+  codes.forEach(function (row) { var cd = String(row[0] || '').trim(); if (cd) existing[cd] = true; });
+  var newCodes = Object.keys(bal).filter(function (cd) {
+    return !existing[cd] && (bal[cd][0] + bal[cd][1] + bal[cd][2]) > 0;
+  }).sort();
+  var newMsg = '';
+  if (newCodes.length) {
+    // 품목 정보에 없는 코드가 있으면 마스터부터 자동 최신화 (실패해도 계속)
+    var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+    var known = {};
+    if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+      var cd = String(r[3] || '').trim(); if (cd) known[cd] = true;
+    });
+    var unknown = newCodes.filter(function (cd) { return !known[cd]; });
+    var refreshNote = '';
+    if (unknown.length) {
+      try { refreshItemMasterCore_(ss); refreshNote = ' (품목 정보 자동 최신화)'; }
+      catch (e) { refreshNote = ' (⚠ 품목 정보 최신화 실패: ' + String(e.message).slice(0, 50) + ')'; }
+    }
+    // 재고 탭 하단에 코드만 추가 → 마스터로 중분류·거래처·품목명 채움 → 실사 순서 재정렬
+    main.getRange(lastRow + 1, 1, newCodes.length, 20).setValues(newCodes.map(function (cd) {
+      var r = new Array(20).fill('');
+      r[COL.CODE - 1] = cd;
+      return r;
+    }));
+    var fill = fillStockTabMasterCore_(ss, b);
+    sortStockRowsCore_(ss, b);
+    lastRow = main.getLastRow();
+    n = lastRow - startRow + 1;
+    codes = main.getRange(startRow, COL.CODE, n, 1).getValues();
+    newMsg = '· 신규 품목 ' + newCodes.length + '건 자동 추가' + refreshNote +
+      (fill.miss.length ? ' — ⚠ 정보 못 채운 코드: ' + fill.miss.slice(0, 8).join(', ') + (fill.miss.length > 8 ? ' …' : '') : '') + '\n';
+  }
+
   // 일사용량: 일별기록 최근 30일 판매 합계 ÷ 30 (기록 14일 미만이면 Supabase 수불부 월 usage_qty ÷ 30 대체)
   var usageRes = computeDailyUsage_(ss, b, map);
   var usage = usageRes.usage;
@@ -1375,17 +1438,14 @@ function morningPrep() {
     main.getRange(startRow, c, n, 1).clearContent();
   });
 
-  // 실사 리스트도 오늘 값으로 자동 재생성 (전일재고·창고재고 갱신분 반영)
-  var countMsg = '';
-  try { var cnt = buildCountSheet_(ss, b, true); countMsg = '· 실사 리스트(_실사리스트) ' + cnt + '품목 재생성\n'; }
-  catch (e) { countMsg = '· ⚠ 실사 리스트 생성 실패: ' + String(e.message).slice(0, 60) + '\n'; }
   ss.setActiveSheet(main);
 
   ui.alert('✅ [' + b.name + '] 아침 준비 완료 (기준일: ' + Utilities.formatDate(prevDate, 'Asia/Seoul', 'M/d') + ' 마감)\n' +
+    newMsg +
     '· 전일 중앙재고 / 창고·수술방 실재고 자동 입력\n' +
     '· 실사·환입·구매입고·페일 입력칸 초기화, 발주 커버일수 ' + cover + '일로 리셋\n' +
-    '· 일사용량: ' + usageRes.source + '\n' + countMsg + '\n' +
-    '실사는 [_실사리스트] I열에 입력 → "⑩ 실사 리스트 → 재고 탭 반영"  (또는 재고 탭 G열에 직접 입력)\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
+    '· 일사용량: ' + usageRes.source + '\n\n' +
+    '실사는 재고 탭 G열에 순서대로 입력하면 됩니다. (종이 실사지가 필요하면 "⑩ 실사 리스트 출력용 생성")\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
 }
 
 /**
