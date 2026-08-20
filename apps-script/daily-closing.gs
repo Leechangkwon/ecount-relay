@@ -1536,9 +1536,11 @@ function fetchSupabaseUsage_(branchName) {
 /** 메뉴: 트리거 설치 (최초 1회, 이후엔 자동) */
 function installAuthQtyTrigger() {
   var installed = ensureAuthQtyTrigger_();
-  SpreadsheetApp.getUi().alert(installed
+  var msg = installed
     ? '✅ 인가량 DB 동기화 트리거 설치 완료\n재고 탭에서 인가량(E·T열)을 수정하면 약 20초 내 ERP 인가량 DB에 반영됩니다.'
-    : '이미 설치되어 있습니다. 인가량(E·T열) 수정 시 자동으로 ERP DB에 반영 중입니다.');
+    : '이미 설치되어 있습니다. 인가량(E·T열) 수정 시 자동으로 ERP DB에 반영 중입니다.';
+  // 편집기에서 직접 실행하면 getUi()가 없으므로 로그로 대체
+  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { Logger.log(msg); }
 }
 
 /** installable onEdit 트리거 없으면 생성. 새로 설치했으면 true */
