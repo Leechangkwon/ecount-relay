@@ -7,7 +7,8 @@ Google Apps Script(부산점 데일리 재고 마감 시트)는 발신 IP가 유
 필요 환경변수 (Render Environment):
   ECOUNT_COM_CODE    이카운트 회사코드
   ECOUNT_USER_ID     이카운트 로그인 ID
-  ECOUNT_API_KEY     이카운트 API 인증키
+  ECOUNT_API_KEY     이카운트 API 인증키 (정식)
+  ECOUNT_TEST_KEY    이카운트 테스트 인증키 (sboapi 검증용, 선택)
   ECOUNT_RELAY_TOKEN 중계 API 호출 토큰 (Apps Script와 공유하는 임의 문자열)
 
 이카운트 측 사전 작업:
@@ -24,9 +25,21 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# 세션 캐시 (workers=1 이므로 모듈 전역으로 충분)
-_session = {'zone': None, 'sid': None, 'at': 0}
+# 세션 캐시 (workers=1 이므로 모듈 전역으로 충분) — live(정식키/oapi), test(테스트키/sboapi) 분리
+_sessions = {
+    'live': {'zone': None, 'sid': None, 'at': 0},
+    'test': {'zone': None, 'sid': None, 'at': 0},
+}
 SESSION_TTL = 12 * 3600  # 12시간
+
+
+def _mode(body):
+    """요청 body의 test 플래그 → 'test'|'live'"""
+    return 'test' if (body or {}).get('test') else 'live'
+
+
+def _domain(mode):
+    return 'sboapi' if mode == 'test' else 'oapi'
 
 
 def _check_token():
@@ -61,41 +74,47 @@ def _post(url, payload, timeout=30):
     return data
 
 
-def _login():
+def _login(mode='live'):
     com = os.environ.get('ECOUNT_COM_CODE')
     uid = os.environ.get('ECOUNT_USER_ID')
-    key = os.environ.get('ECOUNT_API_KEY')
+    key = os.environ.get('ECOUNT_TEST_KEY') if mode == 'test' else os.environ.get('ECOUNT_API_KEY')
     if not (com and uid and key):
-        raise RuntimeError('서버에 ECOUNT_COM_CODE/USER_ID/API_KEY 환경변수가 설정되지 않았습니다.')
+        need = 'ECOUNT_TEST_KEY' if mode == 'test' else 'ECOUNT_API_KEY'
+        raise RuntimeError(f'서버에 ECOUNT_COM_CODE/USER_ID/{need} 환경변수가 설정되지 않았습니다.')
 
-    zone_res = _post('https://oapi.ecount.com/OAPI/V2/Zone', {'COM_CODE': com})
+    dom = _domain(mode)
+    zone_res = _post(f'https://{dom}.ecount.com/OAPI/V2/Zone', {'COM_CODE': com})
     zone = (zone_res.get('Data') or {}).get('ZONE')
     if not zone:
         raise RuntimeError(f'ZONE 조회 실패: {json.dumps(zone_res, ensure_ascii=False)[:300]}')
 
-    login_res = _post(f'https://oapi{zone}.ecount.com/OAPI/V2/OAPILogin', {
+    login_res = _post(f'https://{dom}{zone}.ecount.com/OAPI/V2/OAPILogin', {
         'COM_CODE': com, 'USER_ID': uid, 'API_CERT_KEY': key,
         'LAN_TYPE': 'ko-KR', 'ZONE': zone,
     })
     sid = (((login_res.get('Data') or {}).get('Datas')) or {}).get('SESSION_ID')
     if not sid:
-        raise RuntimeError(f'로그인 실패: {json.dumps(login_res, ensure_ascii=False)[:300]}')
+        raise RuntimeError(f'로그인 실패({mode}): {json.dumps(login_res, ensure_ascii=False)[:300]}')
 
-    _session.update(zone=zone, sid=sid, at=time.time())
-    return _session
-
-
-def _get_session(force_new=False):
-    if not force_new and _session['sid'] and time.time() - _session['at'] < SESSION_TTL:
-        return _session
-    return _login()
+    _sessions[mode].update(zone=zone, sid=sid, at=time.time())
+    return _sessions[mode]
 
 
-def _fetch_inventory(base_date):
+def _get_session(force_new=False, mode='live'):
+    s = _sessions[mode]
+    if not force_new and s['sid'] and time.time() - s['at'] < SESSION_TTL:
+        return s
+    return _login(mode)
+
+
+def _api_url(s, mode, path):
+    return f"https://{_domain(mode)}{s['zone']}.ecount.com/OAPI/V2/{path}?SESSION_ID={s['sid']}"
+
+
+def _fetch_inventory(base_date, mode='live'):
     def attempt(force_new):
-        s = _get_session(force_new)
-        url = (f"https://oapi{s['zone']}.ecount.com/OAPI/V2/InventoryBalance/"
-               f"GetListInventoryBalanceStatusByLocation?SESSION_ID={s['sid']}")
+        s = _get_session(force_new, mode)
+        url = _api_url(s, mode, 'InventoryBalance/GetListInventoryBalanceStatusByLocation')
         res = _post(url, {'BASE_DATE': base_date}, timeout=60)
         inner = res.get('Data') or {}
         rows = inner.get('Result') or inner.get('Results') or (inner.get('Datas') or {}).get('Result')
@@ -125,6 +144,9 @@ SAVE_PATHS = {
     'sale': os.environ.get('ECOUNT_SALE_PATH', 'Sale/SaveSale'),
     # 창고이동입력 공식 경로 (이카운트 OAPI 문서 '기타이동API > 창고이동입력')
     'transfer': os.environ.get('ECOUNT_TRANSFER_PATH', 'Others/SaveLocationTran'),
+    # 구매관리 (이카운트 OAPI 문서 '구매관리API')
+    'purchase_order': os.environ.get('ECOUNT_PO_PATH', 'Purchases/SavePurchaseOrder'),
+    'purchase': os.environ.get('ECOUNT_PURCHASE_PATH', 'Purchases/SavePurchases'),
 }
 
 
@@ -139,14 +161,15 @@ def save_slip():
     kind = str(body.get('kind', '')).strip()
     list_key = str(body.get('list_key', '')).strip()
     rows = body.get('rows')
+    mode = _mode(body)
     if kind not in SAVE_PATHS:
         return jsonify({'ok': False, 'msg': f'kind는 {list(SAVE_PATHS)} 중 하나여야 합니다.'}), 400
     if not list_key or not isinstance(rows, list) or not rows:
         return jsonify({'ok': False, 'msg': 'list_key와 rows(1건 이상)가 필요합니다.'}), 400
 
     def attempt(force_new):
-        s = _get_session(force_new)
-        url = f"https://oapi{s['zone']}.ecount.com/OAPI/V2/{SAVE_PATHS[kind]}?SESSION_ID={s['sid']}"
+        s = _get_session(force_new, mode)
+        url = _api_url(s, mode, SAVE_PATHS[kind])
         payload = {list_key: [{'BulkDatas': r} for r in rows]}
         return _post(url, payload, timeout=60)
 
@@ -158,7 +181,7 @@ def save_slip():
                 res = attempt(True)
             else:
                 raise
-        return jsonify({'ok': True, 'kind': kind, 'sent': len(rows), 'result': res})
+        return jsonify({'ok': True, 'kind': kind, 'mode': mode, 'sent': len(rows), 'result': res})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 502
 
@@ -175,7 +198,7 @@ def inventory():
         return jsonify({'ok': False, 'msg': 'base_date는 YYYYMMDD 형식이어야 합니다.'}), 400
 
     try:
-        rows = _fetch_inventory(base_date)
+        rows = _fetch_inventory(base_date, _mode(body))
         return jsonify({'ok': True, 'base_date': base_date, 'count': len(rows), 'rows': rows})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 502
@@ -185,6 +208,8 @@ def inventory():
 QUERY_PATHS = {
     # 품목조회(목록): 이카운트 문서 ViewBasicProductsListApi. 경로/필드는 첫 호출 결과로 확정
     'products': os.environ.get('ECOUNT_PRODUCTS_PATH', 'InventoryBasic/GetBasicProductsList'),
+    # 발주서조회 (구매관리API) — 미입고 잔량 동기화용
+    'purchase_orders': os.environ.get('ECOUNT_PO_LIST_PATH', 'Purchases/GetPurchasesOrderList'),
 }
 
 
@@ -203,10 +228,11 @@ def query():
     if not (last.startswith('Get') or last.startswith('View')):
         return jsonify({'ok': False, 'msg': '읽기 전용 경로(Get*/View*)만 허용됩니다.'}), 400
     payload = body.get('payload') or {}
+    mode = _mode(body)
 
     def attempt(force_new):
-        s = _get_session(force_new)
-        url = f"https://oapi{s['zone']}.ecount.com/OAPI/V2/{path}?SESSION_ID={s['sid']}"
+        s = _get_session(force_new, mode)
+        url = _api_url(s, mode, path)
         return _post(url, payload, timeout=90)
 
     try:
