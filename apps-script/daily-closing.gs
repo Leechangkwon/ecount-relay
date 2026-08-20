@@ -1484,7 +1484,7 @@ function makeSlipPreview() {
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
   if (itemSheet) {
     itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
-      if (r[3] !== '' && r[3] != null) itemInfo[String(r[3])] = { price: Number(r[7]) || 0 };
+      if (r[3] !== '' && r[3] != null) itemInfo[String(r[3])] = { price: Number(r[7]) || 0, size: String(r[5] || ''), cat: String(r[2] || '') };
     });
   }
 
@@ -1505,32 +1505,67 @@ function makeSlipPreview() {
   }
   function nameOf(cd, fallback) { return cd === fallback.code ? fallback.name : (fallback.name + ' [' + cd + ']'); }
 
-  var out = [];
+  // 품목을 실사리스트와 같은 순서(중분류→계열→Ø→L)로 정렬한 뒤 전표 종류별 섹션으로 묶는다
+  var entries = [];
   data.forEach(function (r) {
-    var code = String(r[COL.CODE - 1] || '').trim(), name = r[COL.NAME - 1];
+    var code = String(r[COL.CODE - 1] || '').trim();
     if (!code) return;
-    var sale = Number(r[COL.SALE - 1]) || 0;
-    var need = Number(r[COL.NEED - 1]) || 0;
-    var ret = Number(r[COL.RET - 1]) || 0;
-    var fb = { code: code, name: name };
-    if (sale > 0) {
-      // 판매(수술방 출고)·중앙→수술방 이동: 각각 해당 창고의 구코드 재고부터
-      split(code, sale, 2).forEach(function (p) {
-        out.push([b.name, '판매', ymdPrev, b.whSurgery, '', p.code, nameOf(p.code, fb), p.qty, (itemInfo[p.code] || itemInfo[code] || {}).price || 0, '대기', '']);
+    var name = String(r[COL.NAME - 1] || '');
+    var info = itemInfo[code] || {};
+    var k = sizeKey_(name, info.size);
+    entries.push({
+      code: code, name: name,
+      cat: String(r[COL.CAT - 1] || '').trim() || info.cat || '기타',
+      series: k.series, dia: k.dia, len: k.len,
+      sale: Number(r[COL.SALE - 1]) || 0,
+      need: Number(r[COL.NEED - 1]) || 0,
+      ret: Number(r[COL.RET - 1]) || 0,
+      whStock: Number(r[COL.STORAGE - 1]) || 0   // J 창고 실재고 (이동 가능 상한)
+    });
+  });
+  entries.sort(countCompare_);
+
+  var secSale = [], secCS = [], secWC = [], secRet = [], shortage = [];
+  entries.forEach(function (e) {
+    var fb = { code: e.code, name: e.name };
+    if (e.sale > 0) {
+      split(e.code, e.sale, 2).forEach(function (p) {
+        secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', p.code, nameOf(p.code, fb), p.qty, (itemInfo[p.code] || itemInfo[e.code] || {}).price || 0, '대기', '']);
       });
-      split(code, sale, 0).forEach(function (p) {
-        out.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+      split(e.code, e.sale, 0).forEach(function (p) {
+        secCS.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
       });
     }
-    if (need > 0) split(code, need, 1).forEach(function (p) {
-      out.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
-    });
-    if (ret > 0) split(code, ret, 0).forEach(function (p) {
-      out.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+    if (e.need > 0) {
+      // 창고 실재고를 넘는 수량은 이동 불가 → 이동수량 = MIN(부족수량, 창고재고). 못 채운 만큼은 경고(발주로 커버)
+      var mv = Math.min(e.need, Math.max(0, e.whStock));
+      var short = e.need - mv;
+      if (short > 0) shortage.push(e.code + ' ' + e.name.slice(0, 12) + ': 필요 ' + e.need + ' 중 ' + mv + '만 이동 (창고재고 ' + e.whStock + ')');
+      if (mv > 0) split(e.code, mv, 1).forEach(function (p) {
+        secWC.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, p.code, nameOf(p.code, fb) + (short > 0 ? ' ⚠창고부족' : ''), p.qty, '', '대기', '']);
+      });
+    }
+    if (e.ret > 0) split(e.code, e.ret, 0).forEach(function (p) {
+      secRet.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
     });
   });
 
-  if (!out.length) { ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return; }
+  if (!secSale.length && !secCS.length && !secWC.length && !secRet.length) {
+    ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return;
+  }
+
+  // 섹션 조립: 밴드 행(코드·수량 없음 → 전송에서 자동 제외)
+  var out = [], bandIdx = [];
+  function addSection(title, rows2) {
+    if (!rows2.length) return;
+    out.push([b.name, '▶ ' + title, '', '', '', '', '', '', '', '', '']);
+    bandIdx.push(out.length);
+    rows2.forEach(function (r) { out.push(r); });
+  }
+  addSection('판매 — 수술방 출고 (' + ymdPrev + ')', secSale);
+  addSection('이동 — 중앙공급실 → 수술방 (' + ymdPrev + ')', secCS);
+  addSection('이동 — 창고 → 중앙공급실 (' + ymdToday + ')', secWC);
+  addSection('환입 — 중앙공급실 → 창고 (' + ymdToday + ')', secRet);
 
   // 이미 전송된 키(중복 방지)
   var sentKeys = getSentKeys_();
@@ -1541,11 +1576,20 @@ function makeSlipPreview() {
   });
 
   var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
-  if (sheet) sheet.clearContents();
+  if (sheet) { sheet.clear(); }
   else sheet = ss.insertSheet(CONFIG.PREVIEW_SHEET, ss.getSheets().length);
-  sheet.getRange(1, 1).setValue('[' + b.name + '] 전송 전 검토용 — 판매·이동(중앙→수술방)은 전일자(' + ymdPrev + '), 창고→중앙 이동·환입은 오늘(' + ymdToday + '). 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "③ 전표 전송" 실행');
-  sheet.getRange(2, 1, 1, 11).setValues([['지점', '구분', '일자', '보내는창고/판매창고', '받는창고', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']]).setFontWeight('bold');
-  sheet.getRange(3, 1, out.length, 11).setValues(out);
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 전송 전 검토용 — 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "③ 전표 전송" 실행' +
+    (shortage.length ? '   ⚠ 창고재고 부족 ' + shortage.length + '건 (이동수량 제한 — 발주 필요)' : ''));
+  sheet.getRange(1, 1).setFontWeight('bold').setFontColor(shortage.length ? '#a35a0c' : '#0e6f6a');
+  sheet.getRange(2, 1, 1, 11).setValues([['지점', '구분', '일자', '보내는창고/판매창고', '받는창고', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']])
+    .setFontWeight('bold').setBackground('#0e6f6a').setFontColor('#ffffff');
+  sheet.getRange(3, 1, out.length, 11).setValues(out).setFontSize(10);
+  sheet.setFrozenRows(2);
+  bandIdx.forEach(function (r) {
+    sheet.getRange(2 + r, 1, 1, 11).setBackground('#e2f1ef').setFontColor('#0e6f6a').setFontWeight('bold');
+    sheet.setRowHeight(2 + r, 24);
+  });
+  sheet.setColumnWidth(4, 200); sheet.setColumnWidth(5, 200); sheet.setColumnWidth(7, 220);
   sheet.showSheet();
   ss.setActiveSheet(sheet);
 
@@ -1553,7 +1597,8 @@ function makeSlipPreview() {
   out.forEach(function (r) { if (r[9] === '대기') cnt[r[1]]++; });
   ui.alert('[' + b.name + '] 전표 초안 생성 완료 — 판매 ' + cnt['판매'] + '건, 이동 ' + cnt['이동'] + '건, 환입 ' + cnt['환입'] + '건' +
     (dup ? '\n(기전송 ' + dup + '건 자동 제외)' : '') +
-    '\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
+    (shortage.length ? '\n\n⚠ 창고재고 부족 ' + shortage.length + '건 — 부족분은 이동에서 제외됨 (발주수량에 반영):\n' + shortage.slice(0, 8).join('\n') + (shortage.length > 8 ? '\n…' : '') : '') +
+    '\n\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
 }
 
 // ══════════════════════════ ③ 전표 전송 ══════════════════════════
