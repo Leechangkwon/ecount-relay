@@ -137,7 +137,8 @@ function onOpen() {
       .addItem('품목 정보 최신화 (이카운트 품목조회 API)', 'refreshItemMaster')
       .addSeparator()
       .addItem('재고 탭 발주 블록 갱신 (일사용량·커버일수·창고인가량)', 'upgradeStockTabLayout')
-      .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab'))
+      .addItem('인가량 탭 → 재고 탭 반영 (인가량_지점명)', 'importAuthQtyToStockTab')
+      .addItem('인가량 수정 → ERP DB 자동 반영 (트리거 설치)', 'installAuthQtyTrigger'))
     .addItem('⑦ API 연결 테스트', 'testApi')
     .addItem('⚙ API 설정', 'setupApiKeys')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('(구) 날짜탭 방식')
@@ -367,7 +368,7 @@ function buildGuideSheet() {
 
   sec('▶ 재고 탭 열 안내');
   add('열', '항목', '설명', 'head');
-  add('A~E', '중분류·거래처·품목코드·품목명·인가량', '인가량(E)은 지점 기준으로 직접 입력. 비어 있으면 부족수량 계산 안 됨', 'line');
+  add('A~E', '중분류·거래처·품목코드·품목명·인가량', '인가량(E)은 지점 기준으로 직접 입력. 비어 있으면 부족수량 계산 안 됨. E·T열을 고치면 약 20초 내 ERP 인가량 DB에도 자동 반영(토스트로 확인)', 'line');
   add('F', '전일재고 (자동)', '① 아침 준비 시 이카운트 전일 마감 중앙공급실 재고', 'line');
   add('G', '오늘 실사 (입력)', '중앙공급실 실사값. 판매 = F − G', 'line');
   add('H · I', '판매 · 부족수량 (수식)', '부족수량 = 인가량 − 실사 (0 미만이면 0)', 'line');
@@ -1364,6 +1365,9 @@ function morningPrep() {
   try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
   var main = b.sheet;
 
+  // 인가량 편집 → ERP DB 동기화 트리거가 없으면 조용히 설치 (이미 있으면 무시)
+  try { ensureAuthQtyTrigger_(); } catch (ig) {}
+
   var today = new Date();
   var prevDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
   var rows = ecountFetchInventory(Utilities.formatDate(prevDate, 'Asia/Seoul', 'yyyyMMdd'));
@@ -1522,6 +1526,92 @@ function fetchSupabaseUsage_(branchName) {
     offset += 1000;
   }
   return { yearMonth: ym, rows: rows };
+}
+
+// ══════════════════════════ 인가량 편집 → ERP DB 자동 반영 ══════════════════════════
+// 재고 탭에서 E(공급실인가량)·T(창고인가량)를 고치면 Supabase 편집 큐(ecount_authqty_edits)에
+// pending 으로 쌓이고, 새 ERP 서버가 20초 주기로 읽어 authorized_quantities 에 반영한다.
+// E열 → 지점 중앙공급실 창고, T열 → 지점 보관창고. (스크립트가 쓴 값은 트리거가 안 돌므로 수기 수정만 전송)
+
+/** 메뉴: 트리거 설치 (최초 1회, 이후엔 자동) */
+function installAuthQtyTrigger() {
+  var installed = ensureAuthQtyTrigger_();
+  SpreadsheetApp.getUi().alert(installed
+    ? '✅ 인가량 DB 동기화 트리거 설치 완료\n재고 탭에서 인가량(E·T열)을 수정하면 약 20초 내 ERP 인가량 DB에 반영됩니다.'
+    : '이미 설치되어 있습니다. 인가량(E·T열) 수정 시 자동으로 ERP DB에 반영 중입니다.');
+}
+
+/** installable onEdit 트리거 없으면 생성. 새로 설치했으면 true */
+function ensureAuthQtyTrigger_() {
+  var exists = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'onEditAuthQty';
+  });
+  if (exists) return false;
+  ScriptApp.newTrigger('onEditAuthQty')
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+    .onEdit()
+    .create();
+  return true;
+}
+
+function onEditAuthQty(e) {
+  var toast = function (msg) {
+    try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, '인가량 → ERP', 6); } catch (ig) {}
+  };
+  try {
+    if (!e || !e.range) return;
+    var sheet = e.range.getSheet();
+    var name = sheet.getName();
+    if (name.indexOf('재고_') !== 0) return;
+    if (e.range.getNumColumns() > 1) return;              // 한 열 편집만 (E·T 동시 붙여넣기는 열별로)
+    var col = e.range.getColumn();
+    if (col !== COL.ALLOW && col !== COL.WH_ALLOW) return; // E 공급실인가량 / T 창고인가량만
+    var startRow = Math.max(e.range.getRow(), CONFIG.DATA_START_ROW);
+    var endRow = e.range.getRow() + e.range.getNumRows() - 1;
+    if (endRow < CONFIG.DATA_START_ROW) return;
+    var nRows = endRow - startRow + 1;
+    if (nRows > 300) { toast('한 번에 300행까지만 전송됩니다. 나눠서 붙여넣으세요.'); return; }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var branchName = name.slice('재고_'.length);
+    var b = getBranches_(ss)[branchName];
+    if (!b) return;
+    var whName = String((col === COL.ALLOW ? b.whCentral : b.whStorage) || '').trim();
+    var whCd = loadWhMap_(ss)[whName];
+    if (!whCd) { toast('창고코드를 못 찾았습니다: ' + whName + ' — ⑧ 창고 목록 새로고침 후 다시 수정하세요.'); return; }
+
+    var vals = sheet.getRange(startRow, col, nRows, 1).getValues();
+    var codes = sheet.getRange(startRow, COL.CODE, nRows, 1).getValues();
+    var payload = [], bad = [];
+    for (var i = 0; i < nRows; i++) {
+      var cd = String(codes[i][0] || '').trim();
+      var raw = vals[i][0];
+      if (!cd || raw === '' || raw == null) continue;      // 코드 없는 행·지우기는 무시
+      var qty = Number(raw);
+      if (!isFinite(qty) || qty < 0) { bad.push(cd + ': ' + raw); continue; }
+      payload.push({ wh_cd: whCd, wh_des: whName, prod_cd: cd, safe_qty: qty, status: 'pending' });
+    }
+    if (bad.length) toast('0 이상 숫자만 반영됩니다 — 제외: ' + bad.slice(0, 5).join(', '));
+    if (!payload.length) return;
+
+    var p = PropertiesService.getScriptProperties();
+    var url = p.getProperty('SB_URL'), key = p.getProperty('SB_KEY');
+    if (!url || !key) { toast('Supabase 미설정 — "⚙ API 설정"에서 SB_URL/SB_KEY 입력 필요'); return; }
+    var res = UrlFetchApp.fetch(String(url).replace(/\/+$/, '') + '/rest/v1/ecount_authqty_edits', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Prefer': 'return=minimal' },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() >= 300) { toast('ERP 전송 실패: ' + res.getContentText().slice(0, 120)); return; }
+    var label = col === COL.ALLOW ? '공급실 인가량' : '창고 인가량';
+    toast(payload.length === 1
+      ? payload[0].prod_cd + ' ' + label + ' ' + payload[0].safe_qty + ' → ERP 반영 요청 (약 20초 내 적용)'
+      : label + ' ' + payload.length + '건 → ERP 반영 요청 (약 20초 내 적용)');
+  } catch (err) {
+    toast('오류: ' + err.message);
+  }
 }
 
 /**
