@@ -86,18 +86,20 @@ var COL = {
   COUNT: 7,    // G 오늘 실사(중앙) [입력]
   SALE: 8,     // H 판매 (수식 = F-G, 실사 시에만)
   NEED: 9,     // I 부족수량 (수식 = MAX(0, E-G))
-  STORAGE: 10, // J 창고 실재고 (자동)
-  SURGERY: 11, // K 수술방 실재고 (자동)
-  RET: 12,     // L 환입 [입력]
-  PURCHASE: 13,// M 구매입고 [입력]
-  FAIL: 14,    // N 페일 [입력]
-  USAGE: 15,   // O 사용량(1일) (자동: 일별기록 최근 14일 평균)
-  DAYS: 16,    // P 발주 커버일수 [입력] — 기본 4, 연휴 전엔 늘려서 발주
-  REQ: 17,     // Q 목표재고 (수식 = O*P)
-  ORDER: 18,   // R 발주수량 (수식 = MAX(0, Q − 중앙실재고 − 창고실재고, 창고인가량 − 창고실재고), 5단위 올림)
-  MEMO: 19,    // S 비고
-  WH_ALLOW: 20 // T 창고 인가량 [입력] — 발주 하한선(창고 최소 유지량)
+  ISSUE: 10,   // J 불출수량 (수식 = MIN(부족수량, 창고실재고) — 창고재고가 모자라면 부족수량보다 적게 불출됨)
+  STORAGE: 11, // K 창고 실재고 (자동)
+  SURGERY: 12, // L 수술방 실재고 (자동)
+  RET: 13,     // M 환입 [입력]
+  PURCHASE: 14,// N 구매입고 [입력]
+  FAIL: 15,    // O 페일 [입력]
+  USAGE: 16,   // P 사용량(1일) (자동: 일별기록 최근 14일 평균)
+  DAYS: 17,    // Q 발주 커버일수 [입력] — 기본 4, 연휴 전엔 늘려서 발주
+  REQ: 18,     // R 목표재고 (수식 = P*Q)
+  ORDER: 19,   // S 발주수량 (수식 = MAX(0, R − 창고가용, 창고인가량 − 창고가용), 5단위 올림)
+  MEMO: 20,    // T 비고
+  WH_ALLOW: 21 // U 창고 인가량 [입력] — 발주 하한선(창고 최소 유지량)
 };
+var N_COLS = 21; // 재고 탭 전체 열 수
 var LOG_HEADERS = ['일자', '지점', '품목코드', '품목명', '전일중앙', '실사중앙', '판매', '부족수량',
   '창고실재고', '수술방실재고', '환입', '구매입고', '페일', '사용량1일', '발주수량', '전표번호', '저장시각'];
 // 설정 탭 열: A지점명 B판매거래처 C담당자코드 D수술방창고 E중앙공급실창고 F보관창고
@@ -368,13 +370,13 @@ function buildGuideSheet() {
 
   sec('▶ 재고 탭 열 안내');
   add('열', '항목', '설명', 'head');
-  add('A~E', '중분류·거래처·품목코드·품목명·인가량', '인가량(E)은 지점 기준으로 직접 입력. 비어 있으면 부족수량 계산 안 됨. E·T열을 고치면 약 20초 내 ERP 인가량 DB에도 자동 반영(토스트로 확인)', 'line');
+  add('A~E', '중분류·거래처·품목코드·품목명·인가량', '인가량(E)은 지점 기준으로 직접 입력. 비어 있으면 부족수량 계산 안 됨. E·U열을 고치면 약 20초 내 ERP 인가량 DB에도 자동 반영(토스트로 확인)', 'line');
   add('F', '전일재고 (자동)', '① 아침 준비 시 이카운트 전일 마감 중앙공급실 재고', 'line');
   add('G', '오늘 실사 (입력)', '중앙공급실 실사값. 판매 = F − G', 'line');
-  add('H · I', '판매 · 부족수량 (수식)', '부족수량 = 인가량 − 실사 (0 미만이면 0)', 'line');
-  add('J · K', '창고 실재고 · 수술방 실재고 (자동)', '참고용. 이카운트 실재고', 'line');
-  add('L · M · N', '환입 · 구매입고 · 페일 (입력)', '있는 날만 입력', 'line');
-  add('O~R · T', '일사용량 · 발주 커버일수 · 목표재고 · 발주수량 · 창고 인가량', '일사용량(O)=최근30일 판매÷30(자동, 초기엔 ERP 수불부 대체). 커버일수(P)=기본 4일(월·수·금 발주, 금→화 입고). 목표재고=O×P(창고 기준). 창고가용=창고실재고−오늘 중앙보충분(부족수량). 발주=MAX(목표−창고가용, 창고인가량−창고가용) 5단위 올림. 연휴 전엔 P를 늘려서 발주(다음날 자동 원복)', 'line');
+  add('H · I · J', '판매 · 부족수량 · 불출수량 (수식)', '부족수량 = 인가량 − 실사 (0 미만이면 0). 불출수량 = MIN(부족수량, 창고재고) — 창고가 모자라면 부족수량보다 적게 불출되고, 모자란 만큼은 발주수량에 반영', 'line');
+  add('K · L', '창고 실재고 · 수술방 실재고 (자동)', '참고용. 이카운트 실재고', 'line');
+  add('M · N · O', '환입 · 구매입고 · 페일 (입력)', '있는 날만 입력', 'line');
+  add('P~S · U', '일사용량 · 발주 커버일수 · 목표재고 · 발주수량 · 창고 인가량', '일사용량(P)=최근30일 판매÷30(자동, 초기엔 ERP 수불부 대체). 커버일수(Q)=기본 4일(월·수·금 발주, 금→화 입고). 목표재고=P×Q(창고 기준). 창고가용=창고실재고−오늘 중앙보충분(부족수량). 발주=MAX(목표−창고가용, 창고인가량−창고가용) 5단위 올림. 연휴 전엔 Q를 늘려서 발주(다음날 자동 원복)', 'line');
   gap();
 
   sec('▶ 탭 설명');
@@ -655,23 +657,23 @@ function buildStockTabFrame_(ss, tabName, data) {
   writeStockHeaders_(main);
   var n = data.length;
   var startRow = CONFIG.DATA_START_ROW;
-  var padded = data.map(function (r) { var x = r.slice(0, 20); while (x.length < 20) x.push(''); return x; });
-  main.getRange(startRow, 1, n, 20).setValues(padded);
+  var padded = data.map(function (r) { var x = r.slice(0, N_COLS); while (x.length < N_COLS) x.push(''); return x; });
+  main.getRange(startRow, 1, n, N_COLS).setValues(padded);
   writeStockFormulas_(main, startRow, n);
   return main;
 }
 
 /** 재고탭 1~2행 헤더 (기존 탭 갱신에도 사용) */
 function writeStockHeaders_(main) {
-  main.getRange(1, 1, 2, 20).clearContent().setBorder(false, false, false, false, false, false);
+  main.getRange(1, 1, 2, N_COLS).clearContent().setBorder(false, false, false, false, false, false);
   main.getRange(1, 1, 1, 5).setValues([['품목', '', '', '', '']]);
-  main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 — 매일 실사', '', '', '']]);
+  main.getRange(1, COL.PREV, 1, 5).setValues([['중앙공급실 — 매일 실사', '', '', '', '']]);
   main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고 (자동)', '']]);
   main.getRange(1, COL.RET, 1, 3).setValues([['수시 입력', '', '']]);
   main.getRange(1, COL.USAGE, 1, 4).setValues([['발주 — 사용량 기반', '', '', '']]);
-  main.getRange(2, 1, 1, 20).setValues([[
+  main.getRange(2, 1, 1, N_COLS).setValues([[
     '중분류', '거래처', '품목코드', '품목명', '공급실\n인가량',
-    '전일재고', '오늘 실사\n✏ 입력', '판매', '부족수량',
+    '전일재고', '오늘 실사\n✏ 입력', '판매', '부족수량', '불출수량',
     '창고', '수술방',
     '환입 ✏', '구매입고 ✏', '페일 ✏',
     '일사용량\n(30일)', '커버일수\n✏ (기본4)', '목표재고', '발주수량', '비고', '창고\n인가량 ✏'
@@ -679,25 +681,25 @@ function writeStockHeaders_(main) {
   // 1행: 구역 밴드 색
   var band = function (c, w, bg) { main.getRange(1, c, 1, w).setBackground(bg).setFontColor('#ffffff'); };
   band(1, 5, '#5b6b76');            // 품목
-  band(COL.PREV, 4, '#1f4e5f');     // 중앙공급실
+  band(COL.PREV, 5, '#1f4e5f');     // 중앙공급실 (전일~불출)
   band(COL.STORAGE, 2, '#37606f');  // 실재고
   band(COL.RET, 3, '#7a6a4f');      // 수시 입력
   band(COL.USAGE, 4, '#0e6f6a');    // 발주
   main.getRange(1, COL.MEMO, 1, 2).setBackground('#5b6b76').setFontColor('#ffffff');
   // 2행: 헤더
-  main.getRange(2, 1, 1, 20).setBackground('#eef2f4').setFontColor('#17232b');
+  main.getRange(2, 1, 1, N_COLS).setBackground('#eef2f4').setFontColor('#17232b');
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
     main.getRange(2, c).setBackground('#f6edc2');   // 입력칸 헤더는 옅은 노랑
   });
   main.getRange(2, COL.ORDER).setBackground('#cfe6e4').setFontColor('#0e6f6a');
-  main.getRange(1, 1, 2, 20).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setFontSize(10);
+  main.getRange(1, 1, 2, N_COLS).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setFontSize(10);
   main.setRowHeight(1, 24);
   main.setRowHeight(2, 34);
   main.setFrozenRows(2);
   main.setFrozenColumns(4);
   // 열 너비
-  [[1, 66], [2, 130], [3, 92], [4, 230], [5, 62], [6, 62], [7, 70], [8, 54], [9, 62], [10, 54], [11, 54],
-   [12, 54], [13, 62], [14, 54], [15, 62], [16, 62], [17, 62], [18, 66], [19, 110], [20, 62]].forEach(function (cw) {
+  [[1, 66], [2, 130], [3, 92], [4, 230], [5, 62], [6, 62], [7, 70], [8, 54], [9, 62], [10, 62], [11, 54],
+   [12, 54], [13, 54], [14, 62], [15, 54], [16, 62], [17, 62], [18, 62], [19, 66], [20, 110], [21, 62]].forEach(function (cw) {
     main.setColumnWidth(cw[0], cw[1]);
   });
   main.setHiddenGridlines(true);
@@ -706,20 +708,23 @@ function writeStockHeaders_(main) {
 /** 재고탭 수식/서식 (기존 탭 갱신에도 사용) */
 function writeStockFormulas_(main, startRow, n) {
   var U = CONFIG.ORDER_ROUND_UNIT;
-  var fSale = [], fNeed = [], fReq = [], fOrder = [];
+  var fSale = [], fNeed = [], fIssue = [], fReq = [], fOrder = [];
   for (var i = 0; i < n; i++) {
     var r = startRow + i;
     fSale.push(['=IF($G' + r + '="","",$F' + r + '-$G' + r + ')']);
     fNeed.push(['=IF($G' + r + '="","",MAX(0,N($E' + r + ')-$G' + r + '))']);
+    // 불출수량 = MIN(부족수량, 창고실재고) — 창고에 없는 만큼은 불출 못 함 (전표 이동수량과 동일 기준)
+    fIssue.push(['=IF($I' + r + '="","",MIN(N($I' + r + '),MAX(0,N($K' + r + '))))']);
     // 목표재고 = 일사용량 × 커버일수 (창고 기준)
-    fReq.push(['=IF(OR($O' + r + '="",$P' + r + '=""),"",$O' + r + '*$P' + r + ')']);
+    fReq.push(['=IF(OR($P' + r + '="",$Q' + r + '=""),"",$P' + r + '*$Q' + r + ')']);
     // 창고 가용재고 = 창고실재고 − 오늘 중앙 보충분(부족수량 I; 실사 전이면 인가량E − 전일중앙F)
     // 발주 = MAX( 목표재고 − 창고가용, 창고인가량 − 창고가용 ) 를 발주단위로 올림. 목표·인가량 둘 다 없으면 빈칸
-    var avail = '(N($J' + r + ')-IF($I' + r + '<>"",N($I' + r + '),MAX(0,N($E' + r + ')-N($F' + r + '))))';
-    fOrder.push(['=IF(AND($Q' + r + '="",$T' + r + '=""),"",MAX(0,CEILING(MAX(N($Q' + r + ')-' + avail + ',N($T' + r + ')-' + avail + ')/' + U + ',1)*' + U + '))']);
+    var avail = '(N($K' + r + ')-IF($I' + r + '<>"",N($I' + r + '),MAX(0,N($E' + r + ')-N($F' + r + '))))';
+    fOrder.push(['=IF(AND($R' + r + '="",$U' + r + '=""),"",MAX(0,CEILING(MAX(N($R' + r + ')-' + avail + ',N($U' + r + ')-' + avail + ')/' + U + ',1)*' + U + '))']);
   }
   main.getRange(startRow, COL.SALE, n, 1).setFormulas(fSale);
   main.getRange(startRow, COL.NEED, n, 1).setFormulas(fNeed);
+  main.getRange(startRow, COL.ISSUE, n, 1).setFormulas(fIssue);
   main.getRange(startRow, COL.REQ, n, 1).setFormulas(fReq);
   main.getRange(startRow, COL.ORDER, n, 1).setFormulas(fOrder);
 
@@ -728,25 +733,25 @@ function writeStockFormulas_(main, startRow, n) {
 
 /** 재고탭 데이터 영역 서식 — 실사리스트와 같은 톤 (입력 노랑 / 자동 회백 / 발주 강조 / 계열 경계선) */
 function styleStockRows_(main, startRow, n) {
-  var body = main.getRange(startRow, 1, n, 20);
+  var body = main.getRange(startRow, 1, n, N_COLS);
   body.setBackground(null).setFontSize(10).setVerticalAlignment('middle')
       .setBorder(null, null, null, null, null, true, '#e3e8ec', SpreadsheetApp.BorderStyle.SOLID);
   // 입력칸 노랑 / 자동칸 회백 / 발주수량 강조
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground('#fff9c4');
   });
-  [COL.PREV, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
+  [COL.PREV, COL.ISSUE, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground('#f4f6f7').setFontColor('#4a5963');
   });
   main.getRange(startRow, COL.ORDER, n, 1).setBackground('#e2f1ef').setFontWeight('bold').setFontColor('#0e6f6a');
   main.getRange(startRow, 1, n, 2).setFontColor('#8494a0').setFontSize(9); // 중분류·거래처는 흐리게
   main.getRange(startRow, COL.CODE, n, 1).setFontWeight('bold');
   // 숫자 열 가운데 정렬
-  [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20].forEach(function (c) {
+  [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setHorizontalAlignment('center');
   });
   // 구역 세로 구분선 (품목|중앙|실재고|수시입력|발주|비고)
-  [5, 9, 11, 14, 18, 20].forEach(function (c) {
+  [5, COL.ISSUE, COL.SURGERY, COL.FAIL, COL.ORDER, COL.WH_ALLOW].forEach(function (c) {
     main.getRange(1, c, startRow + n - 1, 1).setBorder(null, null, null, true, null, null, '#b7c2c9', SpreadsheetApp.BorderStyle.SOLID);
   });
   // 계열/중분류 경계 가로선 (실사리스트와 동일 기준)
@@ -766,7 +771,7 @@ function styleStockRows_(main, startRow, n) {
     var key = cat + '|' + k.series;
     if (prevKey !== null && key !== prevKey) {
       var heavy = (cat !== prevCat);
-      main.getRange(startRow + i, 1, 1, 20).setBorder(true, null, null, null, null, null,
+      main.getRange(startRow + i, 1, 1, N_COLS).setBorder(true, null, null, null, null, null,
         heavy ? '#1f4e5f' : '#7fb8b3', heavy ? SpreadsheetApp.BorderStyle.SOLID_THICK : SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
     }
     prevKey = key; prevCat = cat;
@@ -774,7 +779,7 @@ function styleStockRows_(main, startRow, n) {
 }
 
 /**
- * [인가량_지점명] 탭 (A품목코드 B품목명 C창고인가량 D공급실인가량) → 활성 지점 재고탭의 E(공급실 인가량)·T(창고 인가량)에 반영.
+ * [인가량_지점명] 탭 (A품목코드 B품목명 C창고인가량 D공급실인가량) → 활성 지점 재고탭의 E(공급실 인가량)·U(창고 인가량)에 반영.
  * 코드매핑이 있으면 구코드 인가량은 대표코드에 합산. 재고탭에 없는 코드는 결과 팝업에 표시.
  */
 function importAuthQtyToStockTab() {
@@ -1061,7 +1066,7 @@ function sortStockRowsCore_(ss, b) {
   if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
     if (r[3]) { var cd = String(r[3]).trim(); sizeInfo[cd] = String(r[5] || ''); catInfo[cd] = String(r[2] || ''); }
   });
-  var rng = main.getRange(startRow, 1, n, 20);
+  var rng = main.getRange(startRow, 1, n, N_COLS);
   var vals = rng.getValues();
   var keyed = vals.map(function (r, i) {
     var code = String(r[COL.CODE - 1] || '').trim();
@@ -1093,7 +1098,7 @@ function buildCountSheet_(ss, b, quiet) {
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
   if (n <= 0) throw new Error('품목이 없습니다.');
-  var data = main.getRange(startRow, 1, n, 20).getValues();
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
   var sizeInfo = {}, catInfo = {};
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
@@ -1227,7 +1232,7 @@ function buildPurchaseOrderSheet() {
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
   if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
-  var data = main.getRange(startRow, 1, n, 20).getValues();
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
   // 품목 정보: 코드 → {구매처, 규격, 단가, 품목명}
   var info = {};
@@ -1305,6 +1310,12 @@ function upgradeStockTabLayout() {
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
   if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+  // 구버전 탭(불출수량 열 없음)이면 I(부족수량) 뒤에 열 삽입
+  var addedIssue = false;
+  if (String(main.getRange(2, COL.ISSUE).getValue()).indexOf('불출') < 0) {
+    main.insertColumnAfter(COL.NEED);
+    addedIssue = true;
+  }
   writeStockHeaders_(main);
   writeStockFormulas_(main, startRow, n);
   // 커버일수(P) 비어 있으면 지점 기본값으로
@@ -1312,7 +1323,9 @@ function upgradeStockTabLayout() {
   var pVals = main.getRange(startRow, COL.DAYS, n, 1).getValues().map(function (r) { return [r[0] === '' || r[0] == null ? cover : r[0]]; });
   main.getRange(startRow, COL.DAYS, n, 1).setValues(pVals);
   main.setColumnWidth(COL.WH_ALLOW, 90);
-  ui.alert('✅ [' + b.name + '] 발주 블록 갱신 완료\n· O 일사용량(자동) · P 커버일수(기본 ' + cover + ') · Q 목표재고 · R 발주수량 · T 창고 인가량\n· ① 아침 준비를 실행하면 일사용량이 채워집니다.');
+  ui.alert('✅ [' + b.name + '] 발주 블록 갱신 완료\n' +
+    (addedIssue ? '· J열 "불출수량" 추가 (= MIN(부족수량, 창고재고) — 창고가 모자라면 부족수량보다 적음)\n' : '') +
+    '· P 일사용량(자동) · Q 커버일수(기본 ' + cover + ') · R 목표재고 · S 발주수량 · U 창고 인가량\n· ① 아침 준비를 실행하면 일사용량이 채워집니다.');
 }
 
 // ══════════════════════════ ⓪ 새 구조 초기 구축 ══════════════════════════
@@ -1338,7 +1351,7 @@ function buildNewStructure() {
   srcData.forEach(function (r) {
     if (!r[3]) return; // D 품목코드 없는 행 제외
     rows.push([r[0] || '', r[2] || '', r[3], r[4] || '', r[5] || '',
-      '', '', '', '', '', '', '', '', '', '', r[27] || '', '', '', '']);
+      '', '', '', '', '', '', '', '', '', '', '', r[27] || '', '', '', '']);
   });
   var n = rows.length;
   buildStockTabFrame_(ss, mainName, rows);
@@ -1401,8 +1414,8 @@ function morningPrep() {
       catch (e) { refreshNote = ' (⚠ 품목 정보 최신화 실패: ' + String(e.message).slice(0, 50) + ')'; }
     }
     // 재고 탭 하단에 코드만 추가 → 마스터로 중분류·거래처·품목명 채움 → 실사 순서 재정렬
-    main.getRange(lastRow + 1, 1, newCodes.length, 20).setValues(newCodes.map(function (cd) {
-      var r = new Array(20).fill('');
+    main.getRange(lastRow + 1, 1, newCodes.length, N_COLS).setValues(newCodes.map(function (cd) {
+      var r = new Array(N_COLS).fill('');
       r[COL.CODE - 1] = cd;
       return r;
     }));
@@ -1449,7 +1462,7 @@ function morningPrep() {
     '· 전일 중앙재고 / 창고·수술방 실재고 자동 입력\n' +
     '· 실사·환입·구매입고·페일 입력칸 초기화, 발주 커버일수 ' + cover + '일로 리셋\n' +
     '· 일사용량: ' + usageRes.source + '\n\n' +
-    '실사는 재고 탭 G열에 순서대로 입력하면 됩니다. (종이 실사지가 필요하면 "⑩ 실사 리스트 출력용 생성")\n연휴 전 발주는 P열 커버일수를 늘리면 발주수량이 재계산됩니다.');
+    '실사는 재고 탭 G열에 순서대로 입력하면 됩니다. (종이 실사지가 필요하면 "⑩ 실사 리스트 출력용 생성")\n연휴 전 발주는 Q열 커버일수를 늘리면 발주수량이 재계산됩니다.');
 }
 
 /**
@@ -1529,16 +1542,16 @@ function fetchSupabaseUsage_(branchName) {
 }
 
 // ══════════════════════════ 인가량 편집 → ERP DB 자동 반영 ══════════════════════════
-// 재고 탭에서 E(공급실인가량)·T(창고인가량)를 고치면 Supabase 편집 큐(ecount_authqty_edits)에
+// 재고 탭에서 E(공급실인가량)·U(창고인가량)를 고치면 Supabase 편집 큐(ecount_authqty_edits)에
 // pending 으로 쌓이고, 새 ERP 서버가 20초 주기로 읽어 authorized_quantities 에 반영한다.
-// E열 → 지점 중앙공급실 창고, T열 → 지점 보관창고. (스크립트가 쓴 값은 트리거가 안 돌므로 수기 수정만 전송)
+// E열 → 지점 중앙공급실 창고, U열 → 지점 보관창고. (스크립트가 쓴 값은 트리거가 안 돌므로 수기 수정만 전송)
 
 /** 메뉴: 트리거 설치 (최초 1회, 이후엔 자동) */
 function installAuthQtyTrigger() {
   var installed = ensureAuthQtyTrigger_();
   var msg = installed
-    ? '✅ 인가량 DB 동기화 트리거 설치 완료\n재고 탭에서 인가량(E·T열)을 수정하면 약 20초 내 ERP 인가량 DB에 반영됩니다.'
-    : '이미 설치되어 있습니다. 인가량(E·T열) 수정 시 자동으로 ERP DB에 반영 중입니다.';
+    ? '✅ 인가량 DB 동기화 트리거 설치 완료\n재고 탭에서 인가량(E·U열)을 수정하면 약 20초 내 ERP 인가량 DB에 반영됩니다.'
+    : '이미 설치되어 있습니다. 인가량(E·U열) 수정 시 자동으로 ERP DB에 반영 중입니다.';
   // 편집기에서 직접 실행하면 getUi()가 없으므로 로그로 대체
   try { SpreadsheetApp.getUi().alert(msg); } catch (e) { Logger.log(msg); }
 }
@@ -1565,9 +1578,9 @@ function onEditAuthQty(e) {
     var sheet = e.range.getSheet();
     var name = sheet.getName();
     if (name.indexOf('재고_') !== 0) return;
-    if (e.range.getNumColumns() > 1) return;              // 한 열 편집만 (E·T 동시 붙여넣기는 열별로)
+    if (e.range.getNumColumns() > 1) return;              // 한 열 편집만 (E·U 동시 붙여넣기는 열별로)
     var col = e.range.getColumn();
-    if (col !== COL.ALLOW && col !== COL.WH_ALLOW) return; // E 공급실인가량 / T 창고인가량만
+    if (col !== COL.ALLOW && col !== COL.WH_ALLOW) return; // E 공급실인가량 / U 창고인가량만
     var startRow = Math.max(e.range.getRow(), CONFIG.DATA_START_ROW);
     var endRow = e.range.getRow() + e.range.getNumRows() - 1;
     if (endRow < CONFIG.DATA_START_ROW) return;
@@ -1695,7 +1708,7 @@ function makeSlipPreview() {
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  var data = main.getRange(startRow, 1, n, 19).getValues();
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
   var itemInfo = {};
   var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
@@ -1978,7 +1991,7 @@ function checkInventory() {
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  var data = main.getRange(startRow, 1, n, 19).getValues();
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
   var report = [];
   var storVals = [], surgVals = [];
@@ -1990,10 +2003,13 @@ function checkInventory() {
     if (!code) return;
     var counted = r[COL.COUNT - 1];
     if (counted === '' || counted == null) return; // 오늘 실사한 품목만 점검
-    var expected = Number(counted) + (Number(r[COL.NEED - 1]) || 0) - (Number(r[COL.RET - 1]) || 0);
+    // 창고→중앙 이동은 불출수량(=MIN(부족, 창고재고)) 기준 — 창고부족 품목이 차이로 잘못 잡히지 않게
+    var issued = r[COL.ISSUE - 1];
+    var moved = (issued === '' || issued == null) ? (Number(r[COL.NEED - 1]) || 0) : (Number(issued) || 0);
+    var expected = Number(counted) + moved - (Number(r[COL.RET - 1]) || 0);
     var actual = b[0];
     if (Math.abs(expected - actual) > 0.0001) {
-      report.push([code, r[COL.NAME - 1], Number(counted), Number(r[COL.NEED - 1]) || 0,
+      report.push([code, r[COL.NAME - 1], Number(counted), moved,
         Number(r[COL.RET - 1]) || 0, expected, actual, actual - expected]);
     }
   });
@@ -2056,7 +2072,7 @@ function saveDailyLog() {
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
-  var data = main.getRange(startRow, 1, n, 19).getValues();
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
   var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
 
   var out = [];
