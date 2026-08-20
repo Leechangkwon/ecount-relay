@@ -1725,6 +1725,14 @@ function makeSlipPreview() {
   var balNow = pivotBalance_(ecountFetchInventory(ymdToday), b, map);
   var raw = balNow.__raw || {};
 
+  // 전산 음수재고 감지 — 전일 전표 오류 신호 (분배 계산은 음수를 0으로 취급하지만 원인은 이카운트에서 수정 필요)
+  var negStock = [];
+  Object.keys(raw).forEach(function (cd) {
+    [0, 1, 2].forEach(function (i) {
+      if (Number(raw[cd][i]) < 0) negStock.push(cd + ' ' + ['중앙', '창고', '수술방'][i] + ' ' + raw[cd][i]);
+    });
+  });
+
   // 시트 창고/수술방 실재고도 오늘 값으로 갱신 (불출수량 J열이 전표와 같은 기준이 되도록)
   var storVals = [], surgVals = [];
   data.forEach(function (r) {
@@ -1768,10 +1776,23 @@ function makeSlipPreview() {
   entries.forEach(function (e) {
     var fb = { code: e.code, name: e.name };
     if (e.sale > 0) {
-      split(e.code, e.sale, 2).forEach(function (p) {
+      // 이동(중앙→수술방)을 중앙 재고 기준으로 먼저 분배하고,
+      // 판매(수술방 출고)는 "수술방 재고 + 오늘 이동 유입분" 기준으로 분배해 코드 구성을 일치시킨다
+      // — 두 분배가 어긋나면 수술방에 코드별 음수 재고가 생김 (수술방 무재고 품목, 음수재고 품목 케이스)
+      var mvParts = split(e.code, e.sale, 0);
+      var saleParts;
+      if (hasMap && map.siblings[e.code]) {
+        var availS = {};
+        mvParts.forEach(function (p) { availS[p.code] = (availS[p.code] || 0) + p.qty; });
+        Object.keys(raw).forEach(function (c) { availS[c] = (availS[c] || 0) + Math.max(0, raw[c][2]); });
+        saleParts = splitQtyFifo_(map, e.code, e.sale, availS);
+      } else {
+        saleParts = [{ code: e.code, qty: e.sale }];
+      }
+      saleParts.forEach(function (p) {
         secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', p.code, nameOf(p.code, fb), p.qty, (itemInfo[p.code] || itemInfo[e.code] || {}).price || 0, '대기', '']);
       });
-      split(e.code, e.sale, 0).forEach(function (p) {
+      mvParts.forEach(function (p) {
         secCS.push([b.name, '이동', ymdPrev, b.whCentral, b.whSurgery, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
       });
     }
@@ -1837,6 +1858,7 @@ function makeSlipPreview() {
   ui.alert('[' + b.name + '] 전표 초안 생성 완료 — 판매 ' + cnt['판매'] + '건, 이동 ' + cnt['이동'] + '건, 환입 ' + cnt['환입'] + '건' +
     (dup ? '\n(기전송 ' + dup + '건 자동 제외)' : '') +
     (shortage.length ? '\n\n⚠ 창고재고 부족 ' + shortage.length + '건 — 부족분은 이동에서 제외됨 (발주수량에 반영):\n' + shortage.slice(0, 8).join('\n') + (shortage.length > 8 ? '\n…' : '') : '') +
+    (negStock.length ? '\n\n🚨 전산 음수재고 ' + negStock.length + '건 — 과거 전표 오류 가능성, 이카운트에서 원인 확인·수정 필요:\n' + negStock.slice(0, 8).join('\n') + (negStock.length > 8 ? '\n…' : '') : '') +
     '\n\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
 }
 
