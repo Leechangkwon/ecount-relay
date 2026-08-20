@@ -662,20 +662,44 @@ function buildStockTabFrame_(ss, tabName, data) {
 
 /** 재고탭 1~2행 헤더 (기존 탭 갱신에도 사용) */
 function writeStockHeaders_(main) {
-  main.getRange(1, 1, 2, 20).clearContent();
-  main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 (매일 실사)', '', '', '']]);
-  main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고(자동)', '']]);
-  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주 (사용량 기반)', '', '', '']]);
+  main.getRange(1, 1, 2, 20).clearContent().setBorder(false, false, false, false, false, false);
+  main.getRange(1, 1, 1, 5).setValues([['품목', '', '', '', '']]);
+  main.getRange(1, COL.PREV, 1, 4).setValues([['중앙공급실 — 매일 실사', '', '', '']]);
+  main.getRange(1, COL.STORAGE, 1, 2).setValues([['실재고 (자동)', '']]);
+  main.getRange(1, COL.RET, 1, 3).setValues([['수시 입력', '', '']]);
+  main.getRange(1, COL.USAGE, 1, 4).setValues([['발주 — 사용량 기반', '', '', '']]);
   main.getRange(2, 1, 1, 20).setValues([[
-    '중분류', '거래처', '품목코드', '품목명', '공급실 인가량',
-    '전일재고\n(자동)', '오늘 실사\n입력칸', '판매\n(수식)', '부족수량\n(수식)',
-    '창고 실재고\n(자동)', '수술방 실재고\n(자동)',
-    '환입\n입력칸', '구매입고\n입력칸', '페일\n입력칸',
-    '일사용량\n(자동·최근30일)', '발주 커버일수\n입력칸(기본4)', '목표재고\n(수식)', '발주수량\n(수식)', '비고', '창고 인가량\n(발주 하한)'
+    '중분류', '거래처', '품목코드', '품목명', '공급실\n인가량',
+    '전일재고', '오늘 실사\n✏ 입력', '판매', '부족수량',
+    '창고', '수술방',
+    '환입 ✏', '구매입고 ✏', '페일 ✏',
+    '일사용량\n(30일)', '커버일수\n✏ (기본4)', '목표재고', '발주수량', '비고', '창고\n인가량 ✏'
   ]]);
-  main.getRange(1, 1, 2, 20).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle');
+  // 1행: 구역 밴드 색
+  var band = function (c, w, bg) { main.getRange(1, c, 1, w).setBackground(bg).setFontColor('#ffffff'); };
+  band(1, 5, '#5b6b76');            // 품목
+  band(COL.PREV, 4, '#1f4e5f');     // 중앙공급실
+  band(COL.STORAGE, 2, '#37606f');  // 실재고
+  band(COL.RET, 3, '#7a6a4f');      // 수시 입력
+  band(COL.USAGE, 4, '#0e6f6a');    // 발주
+  main.getRange(1, COL.MEMO, 1, 2).setBackground('#5b6b76').setFontColor('#ffffff');
+  // 2행: 헤더
+  main.getRange(2, 1, 1, 20).setBackground('#eef2f4').setFontColor('#17232b');
+  [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
+    main.getRange(2, c).setBackground('#f6edc2');   // 입력칸 헤더는 옅은 노랑
+  });
+  main.getRange(2, COL.ORDER).setBackground('#cfe6e4').setFontColor('#0e6f6a');
+  main.getRange(1, 1, 2, 20).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setFontSize(10);
+  main.setRowHeight(1, 24);
+  main.setRowHeight(2, 34);
   main.setFrozenRows(2);
   main.setFrozenColumns(4);
+  // 열 너비
+  [[1, 66], [2, 130], [3, 92], [4, 230], [5, 62], [6, 62], [7, 70], [8, 54], [9, 62], [10, 54], [11, 54],
+   [12, 54], [13, 62], [14, 54], [15, 62], [16, 62], [17, 62], [18, 66], [19, 110], [20, 62]].forEach(function (cw) {
+    main.setColumnWidth(cw[0], cw[1]);
+  });
+  main.setHiddenGridlines(true);
 }
 
 /** 재고탭 수식/서식 (기존 탭 갱신에도 사용) */
@@ -698,14 +722,54 @@ function writeStockFormulas_(main, startRow, n) {
   main.getRange(startRow, COL.REQ, n, 1).setFormulas(fReq);
   main.getRange(startRow, COL.ORDER, n, 1).setFormulas(fOrder);
 
-  var yellow = '#fff9c4', gray = '#f0f0f0', blue = '#e3f2fd';
+  styleStockRows_(main, startRow, n);
+}
+
+/** 재고탭 데이터 영역 서식 — 실사리스트와 같은 톤 (입력 노랑 / 자동 회백 / 발주 강조 / 계열 경계선) */
+function styleStockRows_(main, startRow, n) {
+  var body = main.getRange(startRow, 1, n, 20);
+  body.setBackground(null).setFontSize(10).setVerticalAlignment('middle')
+      .setBorder(null, null, null, null, null, true, '#e3e8ec', SpreadsheetApp.BorderStyle.SOLID);
+  // 입력칸 노랑 / 자동칸 회백 / 발주수량 강조
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
-    main.getRange(startRow, c, n, 1).setBackground(yellow);
+    main.getRange(startRow, c, n, 1).setBackground('#fff9c4');
   });
   [COL.PREV, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
-    main.getRange(startRow, c, n, 1).setBackground(gray);
+    main.getRange(startRow, c, n, 1).setBackground('#f4f6f7').setFontColor('#4a5963');
   });
-  main.getRange(startRow, COL.ORDER, n, 1).setBackground(blue).setFontWeight('bold');
+  main.getRange(startRow, COL.ORDER, n, 1).setBackground('#e2f1ef').setFontWeight('bold').setFontColor('#0e6f6a');
+  main.getRange(startRow, 1, n, 2).setFontColor('#8494a0').setFontSize(9); // 중분류·거래처는 흐리게
+  main.getRange(startRow, COL.CODE, n, 1).setFontWeight('bold');
+  // 숫자 열 가운데 정렬
+  [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20].forEach(function (c) {
+    main.getRange(startRow, c, n, 1).setHorizontalAlignment('center');
+  });
+  // 구역 세로 구분선 (품목|중앙|실재고|수시입력|발주|비고)
+  [5, 9, 11, 14, 18, 20].forEach(function (c) {
+    main.getRange(1, c, startRow + n - 1, 1).setBorder(null, null, null, true, null, null, '#b7c2c9', SpreadsheetApp.BorderStyle.SOLID);
+  });
+  // 계열/중분류 경계 가로선 (실사리스트와 동일 기준)
+  var ss = main.getParent();
+  var sizeInfo = {}, catInfo = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    if (r[3]) { var cd = String(r[3]).trim(); sizeInfo[cd] = String(r[5] || ''); catInfo[cd] = String(r[2] || ''); }
+  });
+  var vals = main.getRange(startRow, 1, n, 4).getValues();
+  var prevKey = null, prevCat = null;
+  for (var i = 0; i < n; i++) {
+    var code = String(vals[i][2] || '').trim();
+    if (!code) continue;
+    var cat = String(vals[i][0] || '').trim() || catInfo[code] || '기타';
+    var k = sizeKey_(String(vals[i][3] || ''), sizeInfo[code]);
+    var key = cat + '|' + k.series;
+    if (prevKey !== null && key !== prevKey) {
+      var heavy = (cat !== prevCat);
+      main.getRange(startRow + i, 1, 1, 20).setBorder(true, null, null, null, null, null,
+        heavy ? '#1f4e5f' : '#7fb8b3', heavy ? SpreadsheetApp.BorderStyle.SOLID_THICK : SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    }
+    prevKey = key; prevCat = cat;
+  }
 }
 
 /**
