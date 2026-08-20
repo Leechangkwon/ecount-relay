@@ -1404,6 +1404,7 @@ function sendPurchaseOrderApi() {
       CUST: String(r[12] || ''), CUST_DES: String(r[13] || ''),
       PROD_CD: String(r[10]), QTY: String(Number(r[15])),
       PRICE: String(Number(r[16]) || 0), SUPPLY_AMT: String(Number(r[18]) || 0), VAT_AMT: String(Number(r[19]) || 0),
+      P_AMT1: '0',  // 회사 발주서 양식에 '금액1'이 필수로 설정돼 있음 (2026-08-20 테스트 전송으로 확인)
       REMARKS: String(r[20] || '')
     };
   });
