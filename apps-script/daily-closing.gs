@@ -924,11 +924,12 @@ function sizeKey_(name, size) {
   m = s.match(/^([A-Za-z]+(?:\d[A-Za-z]+)?)[- ]?(\d{2})(\d{2})([A-Za-z]*)/);
   if (m) {
     var series = m[1].toUpperCase();
-    // 오스템 TS3M/TS3S: 사이즈 뒤 A=SOI, B=BA, C=CA 표면 구분 → 계열에 붙여 따로 묶음 (V2/V4/V5 버전은 무시)
+    // 오스템 TS3M(미니)/TS3S(스탠다드): 표면(A=SOI, B=BA, C=CA)이 제품군 — M/S는 직경으로 구분되므로
+    // 'TS3-BA'처럼 표면 기준으로 합쳐 묶음 (V2/V4/V5 버전 표기는 무시). 미니 Ø3.0~3.5 → 스탠다드 Ø4.0~ 순
     if (/^TS3[MS]$/.test(series)) {
       var surf = (m[4] || '').toUpperCase().charAt(0);
       var surfName = { A: 'SOI', B: 'BA', C: 'CA' }[surf];
-      if (surfName) series = series + '-' + surfName;
+      series = surfName ? 'TS3-' + surfName : 'TS3';
     }
     return { series: series, dia: Number(m[2]) / 10, len: Number(m[3]) };
   }
