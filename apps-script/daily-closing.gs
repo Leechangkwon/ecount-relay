@@ -61,6 +61,9 @@ var CONFIG = {
   VAT_RATE: 0.1,
   SALE_LIST_KEY: 'SaleList',
   TRANSFER_LIST_KEY: 'LocationTranList',
+  PO_LIST_KEY: 'PurchaseOrderList',       // 발주서입력 (Purchases/SavePurchaseOrder)
+  PURCHASE_LIST_KEY: 'PurchasesList',     // 구매입력 (Purchases/SavePurchases)
+  ORDERLOG_SHEET: '_발주이력',            // 발주 원장 (미입고 잔량 관리)
   TRANSFER_FROM_FIELD: 'WH_CD_F',
   TRANSFER_TO_FIELD: 'WH_CD_T',
 
@@ -97,9 +100,10 @@ var COL = {
   REQ: 18,     // R 목표재고 (수식 = P*Q)
   ORDER: 19,   // S 발주수량 (수식 = MAX(0, R − 창고가용, 창고인가량 − 창고가용), 5단위 올림)
   MEMO: 20,    // T 비고
-  WH_ALLOW: 21 // U 창고 인가량 [입력] — 발주 하한선(창고 최소 유지량)
+  WH_ALLOW: 21,// U 창고 인가량 [입력] — 발주 하한선(창고 최소 유지량)
+  BACKORDER: 22 // V 미입고 (자동: _발주이력의 진행중 발주 잔량 합) — 발주수량에서 차감돼 중복 발주 방지
 };
-var N_COLS = 21; // 재고 탭 전체 열 수
+var N_COLS = 22; // 재고 탭 전체 열 수
 var LOG_HEADERS = ['일자', '지점', '품목코드', '품목명', '전일중앙', '실사중앙', '판매', '부족수량',
   '창고실재고', '수술방실재고', '환입', '구매입고', '페일', '사용량1일', '발주수량', '전표번호', '저장시각'];
 // 설정 탭 열: A지점명 B판매거래처 C담당자코드 D수술방창고 E중앙공급실창고 F보관창고
@@ -131,7 +135,13 @@ function onOpen() {
       .addItem('매핑 초안 자동 생성 / 열기', 'buildCodeMapping')
       .addItem('재고 탭에 매핑 적용 (구코드 행 합치기)', 'applyCodeMappingToStockTab'))
     .addSubMenu(SpreadsheetApp.getUi().createMenu('⑩ 발주·인가량')
-      .addItem('발주서 양식 생성 (_발주서 탭 → 이카운트 웹자료올리기)', 'buildPurchaseOrderSheet')
+      .addItem('발주서 양식 생성 (_발주서 탭)', 'buildPurchaseOrderSheet')
+      .addItem('발주서 API 전송 (_발주서 → 이카운트, 발주이력 기록)', 'sendPurchaseOrderApi')
+      .addItem('입고 전표 전송 (N열 구매입고 → 구매입력, 발주 자동 연결)', 'sendPurchaseReceipts')
+      .addItem('발주이력 동기화 (이카운트 발주서조회)', 'syncOrderLog')
+      .addItem('발주 API 모드 전환 (테스트 ↔ 실서버)', 'togglePoApiMode')
+      .addSeparator()
+      .addItem('실재고 새로고침 (오늘 기준, 창고·수술방만)', 'refreshLiveStock')
       .addSeparator()
       .addItem('실사 리스트 출력용 생성 (필요할 때만)', 'buildCountSheet')
       .addItem('실사 리스트 → 재고 탭 반영', 'applyCountSheet')
@@ -389,6 +399,13 @@ function buildGuideSheet() {
   add('품목 정보', '품목 마스터', '품목명·규격·단가·분류 참조', 'line');
   add('_전표전송 / _재고점검', '작업 결과', '②③④ 실행 결과. 매번 덮어씀', 'line');
   add('_창고목록 / _API디버그', '숨김', '창고 드롭다운 소스 / API 원본 응답(오류 원인 확인용, 최근 30건)', 'line');
+  gap();
+
+  sec('▶ 발주 사이클 (⑩ 발주·인가량)');
+  add('1', '발주서 양식 생성', '발주수량(S)>0 품목을 [_발주서]로. 발주수량 = 부족분 − 미입고(V, 기발주 미도착분 자동 차감)', 'step');
+  add('2', '발주서 API 전송', '[_발주서]를 이카운트 발주서로 직접 전송. 성공 시 [_발주이력]에 기록되어 미입고 잔량 추적 시작 (검증 전엔 테스트 모드)', 'step');
+  add('3', '입고 도착 시: 재고 탭 N열(구매입고)에 수량 입력 → "입고 전표 전송"', '미입고 발주에 오래된 순으로 자동 연결(발주번호 선택 불필요)되어 구매입력 전표 생성. 부분입고 시 잔량은 계속 미입고로 관리', 'step');
+  add('4', '발주이력 동기화 (주 1회 권장)', '이카운트에서 수기로 종결·삭제한 발주를 [_발주이력]에 반영', 'step');
   gap();
 
   sec('▶ 지점 추가');
@@ -667,6 +684,7 @@ function buildStockTabFrame_(ss, tabName, data) {
 
 /** 재고탭 1~2행 헤더 (기존 탭 갱신에도 사용) */
 function writeStockHeaders_(main) {
+  if (main.getMaxColumns() < N_COLS) main.insertColumnsAfter(main.getMaxColumns(), N_COLS - main.getMaxColumns());
   main.getRange(1, 1, 2, N_COLS).clearContent().setBorder(false, false, false, false, false, false);
   main.getRange(1, 1, 1, 5).setValues([['품목', '', '', '', '']]);
   main.getRange(1, COL.PREV, 1, 5).setValues([['중앙공급실 — 매일 실사', '', '', '', '']]);
@@ -678,7 +696,7 @@ function writeStockHeaders_(main) {
     '전일재고', '오늘 실사\n✏ 입력', '판매', '부족수량', '불출수량',
     '창고', '수술방',
     '환입 ✏', '구매입고 ✏', '페일 ✏',
-    '일사용량\n(30일)', '커버일수\n✏ (기본4)', '목표재고', '발주수량', '비고', '창고\n인가량 ✏'
+    '일사용량\n(30일)', '커버일수\n✏ (기본4)', '목표재고', '발주수량', '비고', '창고\n인가량 ✏', '미입고\n(자동)'
   ]]);
   // 1행: 구역 밴드 색
   var band = function (c, w, bg) { main.getRange(1, c, 1, w).setBackground(bg).setFontColor('#ffffff'); };
@@ -688,6 +706,7 @@ function writeStockHeaders_(main) {
   band(COL.RET, 3, '#7a6a4f');      // 수시 입력
   band(COL.USAGE, 4, '#0e6f6a');    // 발주
   main.getRange(1, COL.MEMO, 1, 2).setBackground('#5b6b76').setFontColor('#ffffff');
+  band(COL.BACKORDER, 1, '#0e6f6a');  // 미입고 = 발주 블록 색
   // 2행: 헤더
   main.getRange(2, 1, 1, N_COLS).setBackground('#eef2f4').setFontColor('#17232b');
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
@@ -701,7 +720,7 @@ function writeStockHeaders_(main) {
   main.setFrozenColumns(4);
   // 열 너비
   [[1, 66], [2, 130], [3, 92], [4, 230], [5, 62], [6, 62], [7, 70], [8, 54], [9, 62], [10, 62], [11, 54],
-   [12, 54], [13, 54], [14, 62], [15, 54], [16, 62], [17, 62], [18, 62], [19, 66], [20, 110], [21, 62]].forEach(function (cw) {
+   [12, 54], [13, 54], [14, 62], [15, 54], [16, 62], [17, 62], [18, 62], [19, 66], [20, 110], [21, 62], [22, 62]].forEach(function (cw) {
     main.setColumnWidth(cw[0], cw[1]);
   });
   main.setHiddenGridlines(true);
@@ -722,7 +741,8 @@ function writeStockFormulas_(main, startRow, n) {
     // 창고 가용재고 = 창고실재고 − 오늘 중앙 보충분(부족수량 I; 실사 전이면 인가량E − 전일중앙F)
     // 발주 = MAX( 목표재고 − 창고가용, 창고인가량 − 창고가용 ) 를 발주단위로 올림. 목표·인가량 둘 다 없으면 빈칸
     var avail = '(N($K' + r + ')-IF($I' + r + '<>"",N($I' + r + '),MAX(0,N($E' + r + ')-N($F' + r + '))))';
-    fOrder.push(['=IF(AND($R' + r + '="",$U' + r + '=""),"",MAX(0,CEILING(MAX(N($R' + r + ')-' + avail + ',N($U' + r + ')-' + avail + ')/' + U + ',1)*' + U + '))']);
+    // 미입고(V) = 이미 발주했지만 아직 입고 안 된 수량 → 부족분에서 차감해 중복 발주 방지
+    fOrder.push(['=IF(AND($R' + r + '="",$U' + r + '=""),"",MAX(0,CEILING((MAX(N($R' + r + ')-' + avail + ',N($U' + r + ')-' + avail + ')-N($V' + r + '))/' + U + ',1)*' + U + '))']);
   }
   main.getRange(startRow, COL.SALE, n, 1).setFormulas(fSale);
   main.getRange(startRow, COL.NEED, n, 1).setFormulas(fNeed);
@@ -742,18 +762,18 @@ function styleStockRows_(main, startRow, n) {
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL, COL.DAYS, COL.WH_ALLOW].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground('#fff9c4');
   });
-  [COL.PREV, COL.ISSUE, COL.STORAGE, COL.SURGERY, COL.USAGE].forEach(function (c) {
+  [COL.PREV, COL.ISSUE, COL.STORAGE, COL.SURGERY, COL.USAGE, COL.BACKORDER].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setBackground('#f4f6f7').setFontColor('#4a5963');
   });
   main.getRange(startRow, COL.ORDER, n, 1).setBackground('#e2f1ef').setFontWeight('bold').setFontColor('#0e6f6a');
   main.getRange(startRow, 1, n, 2).setFontColor('#8494a0').setFontSize(9); // 중분류·거래처는 흐리게
   main.getRange(startRow, COL.CODE, n, 1).setFontWeight('bold');
   // 숫자 열 가운데 정렬
-  [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21].forEach(function (c) {
+  [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22].forEach(function (c) {
     main.getRange(startRow, c, n, 1).setHorizontalAlignment('center');
   });
   // 구역 세로 구분선 (품목|중앙|실재고|수시입력|발주|비고)
-  [5, COL.ISSUE, COL.SURGERY, COL.FAIL, COL.ORDER, COL.WH_ALLOW].forEach(function (c) {
+  [5, COL.ISSUE, COL.SURGERY, COL.FAIL, COL.ORDER, COL.BACKORDER].forEach(function (c) {
     main.getRange(1, c, startRow + n - 1, 1).setBorder(null, null, null, true, null, null, '#b7c2c9', SpreadsheetApp.BorderStyle.SOLID);
   });
   // 계열/중분류 경계 가로선 (실사리스트와 동일 기준)
@@ -1302,6 +1322,294 @@ function buildPurchaseOrderSheet() {
     '\n\n[_발주서] 탭 3행부터 복사 → 이카운트 발주계획 웹자료올리기 양식 2행에 붙여넣기');
 }
 
+// ══════════════════════════ 발주 API · 미입고 관리 ══════════════════════════
+// 발주서입력(SavePurchaseOrder) → [_발주이력] 원장 기록 → 발주수량에서 미입고(V) 차감 →
+// 입고 시 구매입력(SavePurchases, ORD_DATE/ORD_NO로 발주 전표 자동 연결) → 원장 입고누계 갱신.
+// 발주서입력 API는 이카운트 검증 전까지 테스트 모드(sboapi + 테스트키)로 전송한다.
+
+var ORDERLOG_HEADERS = ['발주일자', '발주번호', '지점', '거래처', '품목코드', '품목명', '발주수량', '입고누계', '미입고', '상태', '납기', '기록시각'];
+
+/** 발주 API 모드: 'test'(sboapi+테스트키, 검증용) | 'live'(정식). 기본 test */
+function poApiMode_() {
+  return PropertiesService.getScriptProperties().getProperty('PO_API_MODE') || 'test';
+}
+
+function togglePoApiMode() {
+  var p = PropertiesService.getScriptProperties();
+  var next = poApiMode_() === 'test' ? 'live' : 'test';
+  p.setProperty('PO_API_MODE', next);
+  SpreadsheetApp.getUi().alert('발주 API 모드: ' + (next === 'test' ? '🧪 테스트 (sboapi + 테스트 인증키 — 이카운트 검증용)' : '✅ 실서버 (정식 인증키)') +
+    '\n\n발주서입력 API가 이카운트 검증을 통과하기 전에는 테스트 모드를 사용하세요.');
+}
+
+function ensureOrderLog_(ss) {
+  var sheet = ss.getSheetByName(CONFIG.ORDERLOG_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.ORDERLOG_SHEET, ss.getSheets().length);
+    sheet.getRange(1, 1, 1, ORDERLOG_HEADERS.length).setValues([ORDERLOG_HEADERS])
+      .setFontWeight('bold').setBackground('#0e6f6a').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, 2).setNumberFormat('@');
+    sheet.setColumnWidth(6, 200);
+  }
+  return sheet;
+}
+
+/** [_발주이력]에서 지점의 진행중 발주 미입고 잔량 → {대표코드: 수량} */
+function backorderByCode_(ss, branchName, map) {
+  var out = {};
+  var sheet = ss.getSheetByName(CONFIG.ORDERLOG_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return out;
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, ORDERLOG_HEADERS.length).getValues().forEach(function (r) {
+    if (String(r[2]) !== branchName) return;
+    if (String(r[9]).indexOf('진행') !== 0) return;
+    var cd = String(r[4] || '').trim();
+    var remain = Number(r[8]);
+    if (!cd || !(remain > 0)) return;
+    var rep = map ? repCode_(map, cd) : cd;
+    out[rep] = (out[rep] || 0) + remain;
+  });
+  return out;
+}
+
+/** ⑩ 발주서 API 전송: [_발주서] 내용을 SavePurchaseOrder로 전송, 성공 시 [_발주이력]에 기록 */
+function sendPurchaseOrderApi() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var po = ss.getSheetByName(CONFIG.PO_SHEET);
+  if (!po || po.getLastRow() < 3) { ui.alert('먼저 "발주서 양식 생성"으로 [_발주서]를 만드세요.'); return; }
+  var rows = po.getRange(3, 1, po.getLastRow() - 2, PO_HEADERS.length).getValues()
+    .filter(function (r) { return String(r[10] || '').trim() && Number(r[15]) > 0; });
+  if (!rows.length) { ui.alert('[_발주서]에 전송할 품목이 없습니다.'); return; }
+
+  var mode = poApiMode_();
+  var vendors = {};
+  rows.forEach(function (r) { vendors[String(r[13] || '(구매처 없음)')] = 1; });
+  var go = ui.alert('발주서 ' + rows.length + '품목 / 거래처 ' + Object.keys(vendors).length + '건을 이카운트로 전송합니다.\n' +
+    '모드: ' + (mode === 'test' ? '🧪 테스트 (sboapi + 테스트키)\n⚠ 테스트 모드도 실제 데이터에 발주 전표가 생성됩니다 — 검증 후 이카운트에서 삭제하세요. 발주이력(미입고)에는 기록하지 않습니다.' : '✅ 실서버') +
+    '\n\n진행할까요?', ui.ButtonSet.YES_NO);
+  if (go !== ui.Button.YES) return;
+
+  // 거래처별 순번(B열) 그대로 전표 묶음. 거래처코드가 없으면 거래처명(CUST_DES)으로 자동 매칭
+  var serOrder = [];
+  var bulk = rows.map(function (r) {
+    var ser = String(r[1] || '1');
+    if (serOrder.indexOf(ser) < 0) serOrder.push(ser);
+    return {
+      IO_DATE: String(r[0]), UPLOAD_SER_NO: ser, EMP_CD: String(r[2] || b.emp),
+      WH_CD: whCode5_(r[3]), IO_TYPE: String(r[4] || CONFIG.PO_TRADE_TYPE),
+      TIME_DATE: String(r[7] || ''), REF_DES: '[' + b.name + '] 자동발주',
+      CUST: String(r[12] || ''), CUST_DES: String(r[13] || ''),
+      PROD_CD: String(r[10]), QTY: String(Number(r[15])),
+      PRICE: String(Number(r[16]) || 0), SUPPLY_AMT: String(Number(r[18]) || 0), VAT_AMT: String(Number(r[19]) || 0),
+      REMARKS: String(r[20] || '')
+    };
+  });
+
+  var res = relaySave_('purchase_order', CONFIG.PO_LIST_KEY, bulk, mode === 'test');
+  if (!res.ok) { ui.alert('❌ 전송 실패: ' + res.msg); return; }
+  var d = (res.result || {}).Data || {};
+  var slips = d.SlipNos || [];
+  var failCnt = Number(d.FailCnt) || 0;
+  if (failCnt > 0) {
+    var det = (d.ResultDetails || []).filter(function (x) { return x && x.IsSuccess === false; })
+      .map(function (x) { return x.TotalError; }).join('\n');
+    ui.alert('⚠ 일부 실패 — 성공 ' + (d.SuccessCnt || 0) + ' / 실패 ' + failCnt + '\n' + String(det).slice(0, 400) +
+      '\n\n"_API디버그" 시트에서 원본 응답을 확인하세요.');
+    if (!slips.length) return;
+  }
+
+  if (mode === 'live') {
+    // 전표묶음 순서 = 순번 첫 등장 순서 → SlipNos 매칭
+    var slipBySer = {};
+    serOrder.forEach(function (ser, i) { slipBySer[ser] = slips[i] || '?'; });
+    var log = ensureOrderLog_(ss);
+    var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+    var outRows = rows.map(function (r) {
+      var slip = slipBySer[String(r[1] || '1')] || '?';
+      return [String(r[0]), slip, b.name, String(r[13] || ''), String(r[10]), String(r[11] || ''),
+        Number(r[15]), 0, Number(r[15]), '진행', String(r[7] || ''), now];
+    });
+    log.getRange(log.getLastRow() + 1, 1, outRows.length, ORDERLOG_HEADERS.length).setValues(outRows);
+    ui.alert('✅ 발주서 전송 완료 — 전표 ' + slips.join(', ') + '\n· [_발주이력]에 ' + outRows.length + '품목 기록 (미입고 잔량 추적 시작)\n· ① 아침 준비 시 재고 탭 V열(미입고)에 반영되어 다음 발주에서 자동 차감됩니다.');
+  } else {
+    ui.alert('🧪 테스트 전송 완료 — 전표 ' + slips.join(', ') + '\n이카운트에서 전표 내용 확인 후 삭제하고, 이카운트에 API 검증을 요청하세요.\n검증 통과 후 "발주 API 모드 전환"으로 실서버로 바꾸면 됩니다.');
+  }
+}
+
+/** ⑩ 입고 전표 전송: 재고탭 N열(구매입고) 입력값을 구매입력 전표로 전송 — [_발주이력] 미입고 발주에 오래된 순으로 자동 연결 */
+function sendPurchaseReceipts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  var data = main.getRange(startRow, 1, n, N_COLS).getValues();
+  var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
+
+  var itemInfo = {};
+  var itemSheet = ss.getSheetByName(CONFIG.ITEM_SHEET);
+  if (itemSheet) itemSheet.getDataRange().getValues().slice(1).forEach(function (r) {
+    var cd = String(r[3] || '').trim();
+    if (cd) itemInfo[cd] = { price: Number(r[7]) || 0, name: String(r[4] || ''), vendor: String(r[0] || '').trim() };
+  });
+
+  // 입고 입력 수집 (오늘 이미 전송한 동일 품목·수량은 제외)
+  var sentKeys = getSentKeys_();
+  var wants = [], skipped = 0;
+  data.forEach(function (r) {
+    var cd = String(r[COL.CODE - 1] || '').trim();
+    var qty = Number(r[COL.PURCHASE - 1]);
+    if (!cd || !(qty > 0)) return;
+    var key = ['구매', b.name, ymd, cd, qty].join('|');
+    if (sentKeys[key]) { skipped++; return; }
+    wants.push({ code: cd, name: String(r[COL.NAME - 1] || ''), qty: qty, key: key });
+  });
+  if (!wants.length) {
+    ui.alert('전송할 구매입고(N열) 입력이 없습니다.' + (skipped ? '\n(오늘 기전송 ' + skipped + '건 제외 — 재전송하려면 "전송이력 초기화")' : '')); return;
+  }
+
+  // 원장에서 이 지점의 진행중 발주 로드 (오래된 순)
+  var log = ensureOrderLog_(ss);
+  var ledger = [];
+  if (log.getLastRow() > 1) {
+    log.getRange(2, 1, log.getLastRow() - 1, ORDERLOG_HEADERS.length).getValues().forEach(function (r, i) {
+      if (String(r[2]) === b.name && String(r[9]).indexOf('진행') === 0 && Number(r[8]) > 0) {
+        ledger.push({ row: i + 2, ordDate: String(r[0]), slip: String(r[1]), cust: String(r[3]), code: String(r[4]).trim(), remain: Number(r[8]), got: Number(r[7]) || 0, qty: Number(r[6]) || 0 });
+      }
+    });
+  }
+  ledger.sort(function (a, c) { return (a.ordDate + a.slip) < (c.ordDate + c.slip) ? -1 : 1; });
+
+  // FIFO 매칭: 품목별 입고수량을 미입고 발주에 분배 (코드매핑 형제 코드도 같은 발주로 인정)
+  var map = loadCodeMap_(ss);
+  var lines = [], unlinked = [];
+  wants.forEach(function (w) {
+    var rep = repCode_(map, w.code);
+    var remain = w.qty;
+    ledger.forEach(function (l) {
+      if (remain <= 0 || l.remain <= 0) return;
+      if (repCode_(map, l.code) !== rep) return;
+      var take = Math.min(l.remain, remain);
+      lines.push({ code: w.code, name: w.name, qty: take, ordDate: l.ordDate, ordNo: String(l.slip).split('-')[1] || '', cust: l.cust, ledger: l });
+      l.remain -= take; l.got += take; remain -= take;
+    });
+    if (remain > 0) unlinked.push({ code: w.code, name: w.name, qty: remain, cust: (itemInfo[w.code] || {}).vendor || '' });
+  });
+
+  var msg = '입고 전표를 전송합니다 (' + b.name + ', 입고창고: ' + b.whStorage + ')\n' +
+    '· 발주 연결 ' + lines.length + '건' + (unlinked.length ? '\n· ⚠ 연결할 미입고 발주가 없는 ' + unlinked.length + '건 → 발주 미연결 구매로 전송' : '') +
+    (skipped ? '\n· 오늘 기전송 ' + skipped + '건 제외' : '') +
+    '\n모드: ' + (poApiMode_() === 'test' ? '🧪 테스트' : '✅ 실서버') + '\n\n진행할까요?';
+  if (ui.alert(msg, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  var whMap = loadWhMap_(ss);
+  var whCd = whMap[String(b.whStorage).trim()];
+  if (!whCd) { ui.alert('보관창고 코드를 찾지 못했습니다 — ⑧ 창고 목록 새로고침 후 재시도'); return; }
+
+  var serByCust = {}, serial = 0;
+  function serOf(cust) { var k = cust || '_'; if (!serByCust[k]) serByCust[k] = String(++serial); return serByCust[k]; }
+  var all = lines.concat(unlinked.map(function (u) { return { code: u.code, name: u.name, qty: u.qty, ordDate: '', ordNo: '', cust: u.cust }; }));
+  var bulk = all.map(function (l) {
+    var price = (itemInfo[l.code] || {}).price || 0;
+    var supply = Math.round(l.qty * price);
+    var row = {
+      IO_DATE: ymd, UPLOAD_SER_NO: serOf(l.cust), EMP_CD: b.emp, WH_CD: whCd,
+      CUST_DES: l.cust || '', PROD_CD: l.code, QTY: String(l.qty),
+      PRICE: String(price), SUPPLY_AMT: String(supply), VAT_AMT: String(Math.round(supply * CONFIG.VAT_RATE))
+    };
+    if (l.ordDate && l.ordNo) { row.ORD_DATE = l.ordDate; row.ORD_NO = l.ordNo; }
+    return row;
+  });
+
+  var res = relaySave_('purchase', CONFIG.PURCHASE_LIST_KEY, bulk, poApiMode_() === 'test');
+  if (!res.ok) { ui.alert('❌ 전송 실패: ' + res.msg); return; }
+  var d = (res.result || {}).Data || {};
+  var failCnt = Number(d.FailCnt) || 0;
+  if (failCnt > 0) {
+    var det = (d.ResultDetails || []).filter(function (x) { return x && x.IsSuccess === false; })
+      .map(function (x) { return x.TotalError; }).join('\n');
+    ui.alert('⚠ 일부/전체 실패 — 성공 ' + (d.SuccessCnt || 0) + ' / 실패 ' + failCnt + '\n' + String(det).slice(0, 400) +
+      '\n원장·전송이력은 갱신하지 않았습니다. 원인 수정 후 재시도하세요.');
+    return;
+  }
+
+  // 성공: 원장 입고누계 갱신 + 전송이력 기록
+  lines.forEach(function (l) {
+    log.getRange(l.ledger.row, 8).setValue(l.ledger.got);
+    log.getRange(l.ledger.row, 9).setValue(l.ledger.remain);
+    if (l.ledger.remain <= 0) log.getRange(l.ledger.row, 10).setValue('완료');
+  });
+  wants.forEach(function (w) { sentKeys[w.key] = 1; });
+  putSentKeys_(sentKeys);
+  ui.alert('✅ 입고 전표 전송 완료 — 전표 ' + JSON.stringify(d.SlipNos || []) +
+    '\n· 발주 연결 ' + lines.length + '건 (원장 입고누계 갱신)' +
+    (unlinked.length ? '\n· 발주 미연결 ' + unlinked.length + '건' : '') +
+    '\n\n"④ 재고 재점검"으로 창고 재고를 확인하세요.');
+}
+
+/** ⑩ 발주이력 동기화: 발주서조회 API(최근 31일)로 이카운트에서 종결/삭제된 발주를 원장에 반영 */
+function syncOrderLog() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var log = ss.getSheetByName(CONFIG.ORDERLOG_SHEET);
+  if (!log || log.getLastRow() < 2) { ui.alert('[_발주이력]에 기록이 없습니다.'); return; }
+  var today = new Date();
+  var from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 30);
+  var fmt = function (d) { return Utilities.formatDate(d, 'Asia/Seoul', 'yyyyMMdd'); };
+  var flagBySlip = {}, page = 1;
+  while (page < 20) {
+    var data = ecountQuery_('purchase_orders', {
+      PROD_CD: '', CUST_CD: '',
+      ListParam: { PAGE_CURRENT: page, PAGE_SIZE: 100, BASE_DATE_FROM: fmt(from), BASE_DATE_TO: fmt(today) }
+    });
+    var rows = (data || {}).Result || [];
+    rows.forEach(function (r) { flagBySlip[String(r.ORD_DATE) + '-' + String(r.ORD_NO)] = String(r.P_FLAG); });
+    if (rows.length < 100) break;
+    page++;
+  }
+  var vals = log.getRange(2, 1, log.getLastRow() - 1, ORDERLOG_HEADERS.length).getValues();
+  var closed = 0, missing = 0;
+  vals.forEach(function (r, i) {
+    if (String(r[9]).indexOf('진행') !== 0) return;
+    var slip = String(r[1]);
+    var flag = flagBySlip[slip];
+    if (flag === '9') { log.getRange(i + 2, 10).setValue('완료(이카운트 종결)'); closed++; }
+    else if (flag == null && String(r[0]) >= fmt(from)) { log.getRange(i + 2, 10).setValue('확인필요(이카운트에 없음)'); missing++; }
+  });
+  ui.alert('✅ 발주이력 동기화 완료\n· 이카운트 종결 반영: ' + closed + '건\n· 이카운트에서 못 찾음(삭제 추정): ' + missing + '건' +
+    '\n\n미입고 잔량은 ① 아침 준비 시 재고 탭 V열에 반영됩니다.');
+}
+
+/** 실재고 새로고침: 오늘자 이카운트 재고로 창고(K)·수술방(L)만 갱신 — 실사·판매 산식은 건드리지 않음 */
+function refreshLiveStock() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var main = b.sheet;
+  var startRow = CONFIG.DATA_START_ROW;
+  var n = main.getLastRow() - startRow + 1;
+  if (n <= 0) return;
+  var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
+  var bal = pivotBalance_(ecountFetchInventory(ymd), b, loadCodeMap_(ss));
+  var codes = main.getRange(startRow, COL.CODE, n, 1).getValues();
+  var storVals = [], surgVals = [];
+  codes.forEach(function (row) {
+    var cd = String(row[0] || '').trim();
+    var bb = bal[cd] || [0, 0, 0];
+    storVals.push([cd ? bb[1] : '']);
+    surgVals.push([cd ? bb[2] : '']);
+  });
+  main.getRange(startRow, COL.STORAGE, n, 1).setValues(storVals);
+  main.getRange(startRow, COL.SURGERY, n, 1).setValues(surgVals);
+  ui.alert('✅ [' + b.name + '] 실재고 새로고침 완료 (오늘 ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'HH:mm') + ' 기준)\n창고(K)·수술방(L) 열만 갱신했습니다. 실사·판매 계산에는 영향 없음.');
+}
+
 /** 기존 재고탭을 새 발주 블록(일사용량·커버일수·목표재고·발주수량·창고인가량)으로 갱신 — 데이터는 유지 */
 function upgradeStockTabLayout() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1327,7 +1635,8 @@ function upgradeStockTabLayout() {
   main.setColumnWidth(COL.WH_ALLOW, 90);
   ui.alert('✅ [' + b.name + '] 발주 블록 갱신 완료\n' +
     (addedIssue ? '· J열 "불출수량" 추가 (= MIN(부족수량, 창고재고) — 창고가 모자라면 부족수량보다 적음)\n' : '') +
-    '· P 일사용량(자동) · Q 커버일수(기본 ' + cover + ') · R 목표재고 · S 발주수량 · U 창고 인가량\n· ① 아침 준비를 실행하면 일사용량이 채워집니다.');
+    '· P 일사용량(자동) · Q 커버일수(기본 ' + cover + ') · R 목표재고 · S 발주수량 · U 창고 인가량 · V 미입고(자동)\n' +
+    '· 발주수량 = 부족분 − 미입고(기발주 미도착) — ① 아침 준비를 실행하면 일사용량·미입고가 채워집니다.');
 }
 
 // ══════════════════════════ ⓪ 새 구조 초기 구축 ══════════════════════════
@@ -1451,6 +1760,15 @@ function morningPrep() {
   // 발주 커버일수(P) 지점 기본값으로 리셋 (연휴 전에 늘렸던 값을 매일 원복)
   var cover = b.coverDays || CONFIG.DEFAULT_COVER_DAYS;
   main.getRange(startRow, COL.DAYS, n, 1).setValues(codes.map(function (row) { return [row[0] ? cover : '']; }));
+
+  // 미입고(V): [_발주이력] 진행중 발주 잔량 → 발주수량에서 자동 차감 (중복 발주 방지)
+  try {
+    var backo = backorderByCode_(ss, b.name, map);
+    main.getRange(startRow, COL.BACKORDER, n, 1).setValues(codes.map(function (row) {
+      var cd = String(row[0] || '').trim();
+      return [cd && backo[cd] ? backo[cd] : ''];
+    }));
+  } catch (eBo) { /* 원장 없으면 무시 */ }
 
   // 입력칸 초기화 (실사/환입/구매입고/페일)
   [COL.COUNT, COL.RET, COL.PURCHASE, COL.FAIL].forEach(function (c) {
@@ -2008,13 +2326,13 @@ function putSentKeys_(keys) {
   PropertiesService.getDocumentProperties().setProperty('SENT_KEYS', JSON.stringify(keys));
 }
 
-function relaySave_(kind, listKey, bulk) {
+function relaySave_(kind, listKey, bulk, testMode) {
   var relay = getRelayProps_();
   wakeRelay_(relay);
   var res = UrlFetchApp.fetch(relay.url + '/api/ecount/save', {
     method: 'post', contentType: 'application/json',
     headers: { 'X-Relay-Token': relay.token },
-    payload: JSON.stringify({ kind: kind, list_key: listKey, rows: bulk }),
+    payload: JSON.stringify({ kind: kind, list_key: listKey, rows: bulk, test: !!testMode }),
     muteHttpExceptions: true
   });
   var code = res.getResponseCode();
