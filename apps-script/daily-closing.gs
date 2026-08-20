@@ -1718,14 +1718,23 @@ function makeSlipPreview() {
     });
   }
 
-  // 코드매핑: 대표코드 행의 수량을 구코드 재고부터 소진하도록 분배 (선입선출). 원본 코드별 재고는 오늘 기준 API
+  // 오늘자 실재고 조회 — 창고→중앙 이동 캡은 반드시 오늘 기준이어야 함
+  // (시트 K열은 ① 아침 준비의 전일 마감 값이라 당일 변동 시 과대/과소 이동 발생)
   var map = loadCodeMap_(ss);
   var hasMap = Object.keys(map.siblings).length > 0;
-  var raw = {};
-  if (hasMap) {
-    var balNow = pivotBalance_(ecountFetchInventory(ymdToday), b, map);
-    raw = balNow.__raw || {};
-  }
+  var balNow = pivotBalance_(ecountFetchInventory(ymdToday), b, map);
+  var raw = balNow.__raw || {};
+
+  // 시트 창고/수술방 실재고도 오늘 값으로 갱신 (불출수량 J열이 전표와 같은 기준이 되도록)
+  var storVals = [], surgVals = [];
+  data.forEach(function (r) {
+    var cd = String(r[COL.CODE - 1] || '').trim();
+    var bb = balNow[cd] || [0, 0, 0];
+    storVals.push([cd ? bb[1] : '']);
+    surgVals.push([cd ? bb[2] : '']);
+  });
+  main.getRange(startRow, COL.STORAGE, n, 1).setValues(storVals);
+  main.getRange(startRow, COL.SURGERY, n, 1).setValues(surgVals);
   // slot: 0 중앙, 1 창고, 2 수술방 — 출고 원천 창고 기준으로 분배
   function split(rep, qty, slot) {
     if (!hasMap || !map.siblings[rep]) return [{ code: rep, qty: qty }];
@@ -1750,7 +1759,7 @@ function makeSlipPreview() {
       sale: Number(r[COL.SALE - 1]) || 0,
       need: Number(r[COL.NEED - 1]) || 0,
       ret: Number(r[COL.RET - 1]) || 0,
-      whStock: Number(r[COL.STORAGE - 1]) || 0   // J 창고 실재고 (이동 가능 상한)
+      whStock: balNow[code] ? Number(balNow[code][1]) || 0 : 0   // 오늘자 창고 실재고 (이동 가능 상한)
     });
   });
   entries.sort(countCompare_);
@@ -1987,30 +1996,49 @@ function checkInventory() {
 
   var ymd = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
   var apiRows = ecountFetchInventory(ymd);
-  var bal = pivotBalance_(apiRows, b, loadCodeMap_(ss));
+  var mapC = loadCodeMap_(ss);
+  var bal = pivotBalance_(apiRows, b, mapC);
 
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
   var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
+  // 기대재고의 이동/환입은 시트 수식이 아니라 "실제 전송 성공한 전표" 기준 (_전표전송 탭 집계, 대표코드 합산)
+  // — 수식(불출수량)은 창고재고가 갱신되면 값이 변해서 전송 시점 수량과 어긋날 수 있음
+  var movedBy = {}, retBy = {};
+  var prevSheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
+  if (prevSheet && prevSheet.getLastRow() > 2) {
+    prevSheet.getRange(3, 1, prevSheet.getLastRow() - 2, 11).getValues().forEach(function (r) {
+      if (String(r[0]) !== b.name) return;
+      var st = String(r[9] || '');
+      if (st.indexOf('전송완료') !== 0 && st.indexOf('기전송') !== 0) return;
+      var cd = String(r[5] || '').trim();
+      if (!cd) return;
+      var rep = repCode_(mapC, cd);
+      var qty = Number(r[7]) || 0;
+      if (r[1] === '이동' && String(r[3]).trim() === String(b.whStorage).trim() && String(r[4]).trim() === String(b.whCentral).trim()) {
+        movedBy[rep] = (movedBy[rep] || 0) + qty;
+      }
+      if (r[1] === '환입') retBy[rep] = (retBy[rep] || 0) + qty;
+    });
+  }
+
   var report = [];
   var storVals = [], surgVals = [];
   data.forEach(function (r) {
     var code = String(r[COL.CODE - 1] || '');
-    var b = bal[code] || [0, 0, 0];
-    storVals.push([code ? b[1] : '']);
-    surgVals.push([code ? b[2] : '']);
+    var b2 = bal[code] || [0, 0, 0];
+    storVals.push([code ? b2[1] : '']);
+    surgVals.push([code ? b2[2] : '']);
     if (!code) return;
     var counted = r[COL.COUNT - 1];
     if (counted === '' || counted == null) return; // 오늘 실사한 품목만 점검
-    // 창고→중앙 이동은 불출수량(=MIN(부족, 창고재고)) 기준 — 창고부족 품목이 차이로 잘못 잡히지 않게
-    var issued = r[COL.ISSUE - 1];
-    var moved = (issued === '' || issued == null) ? (Number(r[COL.NEED - 1]) || 0) : (Number(issued) || 0);
-    var expected = Number(counted) + moved - (Number(r[COL.RET - 1]) || 0);
-    var actual = b[0];
+    var moved = movedBy[code] || 0;
+    var ret = retBy[code] || 0;
+    var expected = Number(counted) + moved - ret;
+    var actual = b2[0];
     if (Math.abs(expected - actual) > 0.0001) {
-      report.push([code, r[COL.NAME - 1], Number(counted), moved,
-        Number(r[COL.RET - 1]) || 0, expected, actual, actual - expected]);
+      report.push([code, r[COL.NAME - 1], Number(counted), moved, ret, expected, actual, actual - expected]);
     }
   });
 
@@ -2021,8 +2049,8 @@ function checkInventory() {
   var sheet = ss.getSheetByName(CONFIG.CHECK_SHEET);
   if (sheet) sheet.clearContents();
   else sheet = ss.insertSheet(CONFIG.CHECK_SHEET, ss.getSheets().length);
-  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 재고 점검 (' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm') + ') — 기대재고 = 실사 + 창고→중앙이동 − 환입');
-  sheet.getRange(2, 1, 1, 8).setValues([['품목코드', '품목명', '실사', '이동(부족보충)', '환입', '기대재고', 'ERP 실재고', '차이']]).setFontWeight('bold');
+  sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 재고 점검 (' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm') + ') — 기대재고 = 실사 + 창고→중앙 이동(전송된 전표) − 환입(전표)');
+  sheet.getRange(2, 1, 1, 8).setValues([['품목코드', '품목명', '실사', '이동(전표)', '환입(전표)', '기대재고', 'ERP 실재고', '차이']]).setFontWeight('bold');
   if (report.length) sheet.getRange(3, 1, report.length, 8).setValues(report);
   sheet.showSheet();
   ss.setActiveSheet(sheet);
