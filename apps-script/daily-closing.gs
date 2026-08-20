@@ -116,6 +116,8 @@ function onOpen() {
     .addItem('④ 재고 재점검', 'checkInventory')
     .addItem('⑤ 마감 저장 (일별기록)', 'saveDailyLog')
     .addSeparator()
+    .addItem('전송이력 초기화 (이카운트 전표 삭제 후 재전송용)', 'clearSentKeysForBranch')
+    .addSeparator()
     .addItem('⓪ 새 구조 초기 구축 (최초 1회)', 'buildNewStructure')
     .addItem('⑥ 과거 날짜탭 아카이브', 'archiveOldTabs')
     .addItem('⑦ 사용안내 탭 만들기/갱신', 'buildGuideSheet')
@@ -1975,6 +1977,27 @@ function sendSlips() {
 function slipKey_(r) {
   return [r[0], r[1], r[2], r[3], r[4], r[5], r[7]].join('|');
 }
+/** 활성 지점의 전송이력(중복 방지 키) 초기화 — 이카운트에서 전표를 삭제하고 같은 수량으로 재전송할 때 사용 */
+function clearSentKeysForBranch() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var b;
+  try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
+  var keys = getSentKeys_();
+  var prefix = b.name + '|';
+  var removed = 0;
+  Object.keys(keys).forEach(function (k) {
+    if (k.indexOf(prefix) === 0) { delete keys[k]; removed++; }
+  });
+  if (!removed) { ui.alert('[' + b.name + '] 삭제할 전송이력이 없습니다.'); return; }
+  var go = ui.alert('[' + b.name + '] 전송이력 ' + removed + '건을 초기화할까요?\n\n' +
+    '⚠ 초기화하면 ② 미리보기에서 "기전송" 표시가 사라지고 ③에서 같은 전표가 다시 전송됩니다.\n' +
+    '이카운트에서 해당 전표를 이미 삭제한 경우에만 사용하세요. (중복 전표 위험)', ui.ButtonSet.YES_NO);
+  if (go !== ui.Button.YES) return;
+  putSentKeys_(keys);
+  ui.alert('✅ [' + b.name + '] 전송이력 ' + removed + '건 초기화 완료.\n"② 마감 전표 미리보기"를 다시 실행하면 전 항목이 "대기"로 생성됩니다.');
+}
+
 function getSentKeys_() {
   try { return JSON.parse(PropertiesService.getDocumentProperties().getProperty('SENT_KEYS') || '{}'); }
   catch (e) { return {}; }
@@ -2390,20 +2413,31 @@ function ecountFetchInventory(baseDateYmd) {
   var relay = getRelayProps_();
   wakeRelay_(relay);
   var url = relay.url + '/api/ecount/inventory';
-  var res = UrlFetchApp.fetch(url, {
-    method: 'post', contentType: 'application/json',
-    headers: { 'X-Relay-Token': relay.token },
-    payload: JSON.stringify({ base_date: baseDateYmd }),
-    muteHttpExceptions: true
-  });
-  var code = res.getResponseCode();
-  var text = res.getContentText();
-  logDebug_(url, { base_date: baseDateYmd }, code, text);
-  var json;
-  try { json = JSON.parse(text); } catch (e) { throw new Error('HTTP ' + code + ' — 응답 해석 실패: ' + text.slice(0, 300)); }
-  if (code !== 200 || !json.ok) throw new Error((json && json.msg) || ('HTTP ' + code + ' — ' + text.slice(0, 300)));
-  if (!json.rows) throw new Error('예상과 다른 응답 형식입니다. "_API디버그" 시트를 확인하세요.');
-  return json.rows;
+  var lastErr = null;
+  // 이카운트는 재고현황을 짧은 간격으로 연속 호출하면 HTTP 412(호출 제한)로 거부 → 대기 후 재시도
+  for (var attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) Utilities.sleep(15000);
+    var res = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json',
+      headers: { 'X-Relay-Token': relay.token },
+      payload: JSON.stringify({ base_date: baseDateYmd }),
+      muteHttpExceptions: true
+    });
+    var code = res.getResponseCode();
+    var text = res.getContentText();
+    logDebug_(url, { base_date: baseDateYmd, attempt: attempt + 1 }, code, text);
+    var json;
+    try { json = JSON.parse(text); } catch (e) { lastErr = new Error('HTTP ' + code + ' — 응답 해석 실패: ' + text.slice(0, 300)); continue; }
+    if (code !== 200 || !json.ok) {
+      var msg = (json && json.msg) || ('HTTP ' + code + ' — ' + text.slice(0, 300));
+      lastErr = new Error(msg);
+      if (String(msg).indexOf('412') >= 0) continue;   // 호출 제한 → 15초 후 재시도
+      throw lastErr;                                    // 그 외 오류는 즉시 중단
+    }
+    if (!json.rows) throw new Error('예상과 다른 응답 형식입니다. "_API디버그" 시트를 확인하세요.');
+    return json.rows;
+  }
+  throw new Error('이카운트 호출 제한(412)으로 3회 실패 — 1분 뒤 다시 실행하세요. (' + String(lastErr && lastErr.message).slice(0, 120) + ')');
 }
 
 function testApi() {
