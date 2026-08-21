@@ -1298,7 +1298,8 @@ function buildPurchaseOrderSheet() {
     lines.push({ vendor: vendor, row: [
       ymd, '', b.emp, whCd, CONFIG.PO_TRADE_TYPE, '', '', due, '', '',
       code, it.name || String(r[COL.NAME - 1] || ''), '', vendor, it.size || '',
-      qty, price, '', supply, Math.round(supply * CONFIG.VAT_RATE), '[' + b.name + '] 자동발주 ' + Utilities.formatDate(today, 'Asia/Seoul', 'M/d'), '', ''
+      qty, price, '', supply, Math.round(supply * CONFIG.VAT_RATE), '[' + b.name + '] 자동발주 ' + Utilities.formatDate(today, 'Asia/Seoul', 'M/d'), '',
+      qty  // 박스단위(박스수량): 기본 = 낱개수량. 박스 입수가 다른 품목은 [_발주서]에서 이 열만 수정
     ]});
   });
   if (!lines.length) { ui.alert('[' + b.name + '] 발주수량이 0보다 큰 품목이 없습니다.'); return; }
@@ -1436,6 +1437,7 @@ function sendPurchaseOrderApi() {
       TIME_DATE: String(r[7] || ''), REF_DES: '[' + b.name + '] 자동발주',
       CUST: String(r[12] || ''), CUST_DES: String(r[13] || ''),
       PROD_CD: String(r[10]), QTY: String(Number(r[15])),
+      UQTY: String(Number(r[22]) || Number(r[15]) || 0),  // 박스수량(화면 '박스수량' = API 추가수량) — 발주서 '박스단위' 열, 기본 낱개수량과 동일
       PRICE: String(Number(r[16]) || 0), SUPPLY_AMT: String(Number(r[18]) || 0), VAT_AMT: String(Number(r[19]) || 0),
       P_AMT1: '0',  // 회사 발주서 양식에 '금액1'이 필수로 설정돼 있음 (2026-08-20 테스트 전송으로 확인)
       REMARKS: String(r[20] || '')
