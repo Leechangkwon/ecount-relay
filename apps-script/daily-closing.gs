@@ -1754,6 +1754,9 @@ function morningPrep() {
       (fill.miss.length ? ' — ⚠ 정보 못 채운 코드: ' + fill.miss.slice(0, 8).join(', ') + (fill.miss.length > 8 ? ' …' : '') : '') + '\n';
   }
 
+  // 수식·서식 자가 복구 — 실수로 지워진 판매/부족/불출/목표/발주 수식과 구분선을 매일 아침 재적용
+  writeStockFormulas_(main, startRow, n);
+
   // 일사용량: 일별기록 최근 30일 판매 합계 ÷ 30 (기록 14일 미만이면 Supabase 수불부 월 usage_qty ÷ 30 대체)
   var usageRes = computeDailyUsage_(ss, b, map);
   var usage = usageRes.usage;
