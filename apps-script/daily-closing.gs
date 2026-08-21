@@ -1460,10 +1460,10 @@ function sendPurchaseOrderApi() {
       TIME_DATE: String(r[7] || ''), REF_DES: '[' + b.name + '] 자동발주',
       CUST: String(r[12] || ''), CUST_DES: String(r[13] || ''),
       PROD_CD: String(r[10]), QTY: String(Number(r[15])),
-      UQTY: String(Number(r[22]) || Number(r[15]) || 0),  // 박스수량(화면 '박스수량' = API 추가수량) — 발주서 '박스단위' 열, 기본 낱개수량과 동일
       PRICE: String(Number(r[16]) || 0), SUPPLY_AMT: String(Number(r[18]) || 0), VAT_AMT: String(Number(r[19]) || 0),
       USER_PRICE_VAT: String(Number(r[21]) || 0),  // 단가(vat포함) — 품목정보 입고단가는 VAT 포함가
       P_AMT1: '0',  // 회사 발주서 양식에 '금액1'이 필수로 설정돼 있음 (2026-08-20 테스트 전송으로 확인)
+      P_AMT2: String(Number(r[22]) || Number(r[15]) || 0),  // 화면 '박스수량' = 금액2 필드 (2026-08-21 진단 전표 20260821-27로 확정) — 발주서 '박스단위' 열, 기본 낱개수량
       REMARKS: String(r[20] || '')
     };
   });
@@ -1598,7 +1598,8 @@ function sendPurchaseReceipts() {
       CUST_DES: l.cust || '', PROD_CD: l.code, QTY: String(l.qty),
       PRICE: String(l.qty > 0 ? Math.round(supply / l.qty) : 0),
       SUPPLY_AMT: String(supply), VAT_AMT: String(vat),
-      USER_PRICE_VAT: String(priceVat)
+      USER_PRICE_VAT: String(priceVat),
+      P_AMT2: String(l.qty)  // 박스수량(=금액2 필드) — 기본 낱개수량과 동일
     };
     if (l.ordDate && l.ordNo) { row.ORD_DATE = l.ordDate; row.ORD_NO = l.ordNo; }
     return row;
