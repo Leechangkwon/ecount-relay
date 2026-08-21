@@ -378,6 +378,7 @@ function buildGuideSheet() {
   add('4', '③ 전표 전송 → 확인창 "예"', '이카운트에 판매·창고이동 전표 생성. 전표번호는 _전표전송 K열. 같은 전표는 두 번 안 나감', 'step');
   add('5', '④ 재고 재점검', '이카운트 실재고를 다시 받아 기대재고와 대조. 차이 품목만 _재고점검 탭에 표시. 0건이면 정상', 'step');
   add('6', '⑤ 마감 저장 (퇴근 전)', '전 품목 상태를 일별기록에 저장. 담당자 실수 추적·사용량(1일)·발주수량 계산의 근거', 'step');
+  add('※', '페일 픽스쳐 (중분류 "페일픽스쳐")', '식립 실패로 재고가 없다가 생기는 품목 — 실사값(G)만 입력하면 ②가 자동으로 판매 −N(사용 차감, 전일자) + 수술방→창고 이동 +N(반품 대기 보관, 오늘자)을 생성. ④ 중앙재고 점검에서는 제외. 업체 반품 시 창고에서 처리', 'line');
   gap();
 
   sec('▶ 재고 탭 열 안내');
@@ -2161,9 +2162,19 @@ function makeSlipPreview() {
   });
   entries.sort(countCompare_);
 
-  var secSale = [], secCS = [], secWC = [], secRet = [], shortage = [], overCount = [];
+  var secSale = [], secCS = [], secWC = [], secRet = [], secFail = [], shortage = [], overCount = [];
   entries.forEach(function (e) {
     var fb = { code: e.code, name: e.name };
+    var isFail = e.cat === '페일픽스쳐';
+    // 페일 픽스쳐: 재고가 없다가 실사로 생기는 품목 (식립 실패 반품분).
+    // 실사 N → 판매 −N(수술방, 전일자: 사용 실적 차감 + 수술방 재고 생성) → 수술방→창고 이동 +N(오늘자: 반품 대기 보관)
+    if (isFail && e.sale < 0) {
+      var fq = -e.sale;
+      var fPrice = (itemInfo[e.code] || {}).price || 0;
+      secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', e.code, e.name + ' (페일 차감)', e.sale, fPrice, '대기', '']);
+      secFail.push([b.name, '이동', ymdToday, b.whSurgery, b.whStorage, e.code, e.name + ' (페일 보관)', fq, '', '대기', '']);
+      return;
+    }
     if (e.sale < 0) overCount.push(e.code + ' ' + e.name.slice(0, 12) + ': 실사가 전일재고보다 ' + (-e.sale) + ' 많음');
     if (e.sale > 0) {
       // 이동(중앙→수술방)을 중앙 재고 기준으로 먼저 분배하고,
@@ -2200,7 +2211,7 @@ function makeSlipPreview() {
     });
   });
 
-  if (!secSale.length && !secCS.length && !secWC.length && !secRet.length) {
+  if (!secSale.length && !secCS.length && !secWC.length && !secFail.length && !secRet.length) {
     ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return;
   }
 
@@ -2215,6 +2226,7 @@ function makeSlipPreview() {
   addSection('판매 — 수술방 출고 (' + ymdPrev + ')', secSale);
   addSection('이동 — 중앙공급실 → 수술방 (' + ymdPrev + ')', secCS);
   addSection('이동 — 창고 → 중앙공급실 (' + ymdToday + ')', secWC);
+  addSection('이동 — 수술방 → 창고 (페일 보관, ' + ymdToday + ')', secFail);
   addSection('환입 — 중앙공급실 → 창고 (' + ymdToday + ')', secRet);
 
   // 이미 전송된 키(중복 방지)
@@ -2274,7 +2286,8 @@ function sendSlips() {
   var rows = sheet.getRange(3, 1, lastRow - 2, 11).getValues();
   var pend = [];
   rows.forEach(function (r, i) {
-    if (String(r[9]).trim() === '대기' && Number(r[7]) > 0 && r[5]) pend.push({ i: i, r: r });
+    // 수량 0은 제외하되 음수는 허용 (페일 픽스쳐 판매 차감 전표)
+    if (String(r[9]).trim() === '대기' && Number(r[7]) !== 0 && r[5]) pend.push({ i: i, r: r });
   });
   if (!pend.length) { ui.alert('전송할 "대기" 상태 행이 없습니다.'); return; }
 
@@ -2493,6 +2506,8 @@ function checkInventory() {
     if (!code) return;
     var counted = r[COL.COUNT - 1];
     if (counted === '' || counted == null) return; // 오늘 실사한 품목만 점검
+    // 페일 픽스쳐는 중앙을 거치지 않는 흐름(판매 차감 → 수술방→창고 보관)이라 중앙 재고 비교에서 제외
+    if (String(r[COL.CAT - 1] || '').trim() === '페일픽스쳐') return;
     var moved = movedBy[code] || 0;
     var ret = retBy[code] || 0;
     var expected = Number(counted) + moved - ret;
