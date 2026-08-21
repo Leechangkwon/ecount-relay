@@ -2110,9 +2110,10 @@ function makeSlipPreview() {
   });
   entries.sort(countCompare_);
 
-  var secSale = [], secCS = [], secWC = [], secRet = [], shortage = [];
+  var secSale = [], secCS = [], secWC = [], secRet = [], shortage = [], overCount = [];
   entries.forEach(function (e) {
     var fb = { code: e.code, name: e.name };
+    if (e.sale < 0) overCount.push(e.code + ' ' + e.name.slice(0, 12) + ': 실사가 전일재고보다 ' + (-e.sale) + ' 많음');
     if (e.sale > 0) {
       // 이동(중앙→수술방)을 중앙 재고 기준으로 먼저 분배하고,
       // 판매(수술방 출고)는 "수술방 재고 + 오늘 이동 유입분" 기준으로 분배해 코드 구성을 일치시킨다
@@ -2197,6 +2198,7 @@ function makeSlipPreview() {
     (dup ? '\n(기전송 ' + dup + '건 자동 제외)' : '') +
     (shortage.length ? '\n\n⚠ 창고재고 부족 ' + shortage.length + '건 — 부족분은 이동에서 제외됨 (발주수량에 반영):\n' + shortage.slice(0, 8).join('\n') + (shortage.length > 8 ? '\n…' : '') : '') +
     (negStock.length ? '\n\n🚨 전산 음수재고 ' + negStock.length + '건 — 과거 전표 오류 가능성, 이카운트에서 원인 확인·수정 필요:\n' + negStock.slice(0, 8).join('\n') + (negStock.length > 8 ? '\n…' : '') : '') +
+    (overCount.length ? '\n\n⚠ 실사 > 전일재고 ' + overCount.length + '건 — 판매 전표 생략됨. 전산 누락(이동/입고/환입 미기입) 확인 후 이카운트에 소급 기입 필요:\n' + overCount.slice(0, 8).join('\n') + (overCount.length > 8 ? '\n…' : '') : '') +
     '\n\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
 }
 
