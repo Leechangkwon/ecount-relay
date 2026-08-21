@@ -397,7 +397,8 @@ function buildGuideSheet() {
   add('일별기록', '감사 로그', '⑤ 마감 저장 시 하루 한 번 전 품목 스냅샷. 일자·지점·품목으로 필터해 과거 확인', 'line');
   add('설정', '지점 설정', '지점명·판매거래처코드·담당자코드·창고 3개(드롭다운). 지점 추가는 행 추가', 'line');
   add('품목 정보', '품목 마스터', '품목명·규격·단가·분류 참조', 'line');
-  add('_전표전송 / _재고점검', '작업 결과', '②③④ 실행 결과. 매번 덮어씀', 'line');
+  add('_전표전송_지점명 / _재고점검_지점명 / _발주서_지점명 / _실사리스트_지점명', '지점별 작업 결과', '②③④⑩ 실행 결과 — 지점별 탭이라 담당자들이 동시에 작업 가능. 실행할 때마다 덮어씀', 'line');
+  add('_발주이력', '발주 원장 (전 지점 공용)', '발주서 API 전송 시 자동 기록, 지점 열로 구분. 미입고 잔량 추적의 기준', 'line');
   add('_창고목록 / _API디버그', '숨김', '창고 드롭다운 소스 / API 원본 응답(오류 원인 확인용, 최근 30건)', 'line');
   gap();
 
@@ -1161,9 +1162,10 @@ function buildCountSheet_(ss, b, quiet) {
     itemRows.push(out.length);
   });
 
-  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
+  var cntName = branchTab_(CONFIG.COUNT_SHEET, b);
+  var sheet = ss.getSheetByName(cntName);
   if (sheet) { sheet.clear(); sheet.clearFormats(); if (sheet.getMaxColumns() >= 12) sheet.showColumns(12); }
-  else sheet = ss.insertSheet(CONFIG.COUNT_SHEET, ss.getSheets().length);
+  else sheet = ss.insertSheet(cntName, ss.getSheets().length);
   var HEAD = 2, START = 3, COLS = 12;
   sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 실사 리스트 ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d (E)') +
     ' — 실사값은 I열(노란칸)에 입력 후 "⑩ 실사 리스트 → 재고 탭 반영"');
@@ -1207,8 +1209,16 @@ function buildCountSheet_(ss, b, quiet) {
 function applyCountSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);
-  if (!sheet || sheet.getLastRow() < 3) { ui.alert('[_실사리스트]가 없습니다. 먼저 "실사 리스트 생성"을 실행하세요.'); return; }
+  // 지점 판별: _실사리스트_지점 탭에서 실행하면 그 탭, 재고_지점 탭에서 실행하면 해당 지점 리스트
+  var act = ss.getActiveSheet().getName();
+  var sheet = null;
+  if (act.indexOf(CONFIG.COUNT_SHEET + '_') === 0) {
+    sheet = ss.getActiveSheet();
+  } else {
+    try { sheet = ss.getSheetByName(branchTab_(CONFIG.COUNT_SHEET, branchFromActive_(ss))); } catch (e) {}
+  }
+  if (!sheet) sheet = ss.getSheetByName(CONFIG.COUNT_SHEET);  // 구버전 호환
+  if (!sheet || sheet.getLastRow() < 3) { ui.alert('실사 리스트가 없습니다. 먼저 "실사 리스트 출력용 생성"을 실행하세요.'); return; }
   var title = String(sheet.getRange(1, 1).getValue());
   var bm = title.match(/^\[(.+?)\]/);
   if (!bm) { ui.alert('실사 리스트의 지점을 알 수 없습니다.'); return; }
@@ -1313,9 +1323,10 @@ function buildPurchaseOrderSheet() {
     l.row[1] = String(serial);
   });
 
-  var sheet = ss.getSheetByName(CONFIG.PO_SHEET);
+  var poName = branchTab_(CONFIG.PO_SHEET, b);
+  var sheet = ss.getSheetByName(poName);
   if (sheet) sheet.clear();
-  else sheet = ss.insertSheet(CONFIG.PO_SHEET, ss.getSheets().length);
+  else sheet = ss.insertSheet(poName, ss.getSheets().length);
   sheet.getRange(1, 1).setValue('[' + b.name + '] 발주계획 ' + ymd + ' — 이카운트 발주계획 웹자료올리기 양식. 3행부터 끝까지 복사 → 양식(Template.xlsx) 2행에 붙여넣기. 순번=거래처별 전표 묶음, 납기 ' + due + '. 수량·단가는 수정 가능');
   sheet.getRange(2, 1, 1, PO_HEADERS.length).setValues([PO_HEADERS]).setFontWeight('bold').setBackground('#e2f1ef');
   // 코드류 열(일자·순번·담당자·창고·거래유형·납기·품목코드·거래처코드)은 텍스트로 — 앞의 0 보존, 소수점 방지
@@ -1335,7 +1346,7 @@ function buildPurchaseOrderSheet() {
   ui.alert('✅ [' + b.name + '] 발주서 ' + lines.length + '품목 / 거래처 ' + serial + '건 생성\n' +
     Object.keys(vendors).map(function (v) { return '· ' + v + ': ' + vendors[v] + '품목'; }).join('\n') +
     (noVendor ? '\n\n⚠ 구매처 없는 품목 ' + noVendor + '건 — 거래처명(N열) 직접 입력' : '') +
-    '\n\n[_발주서] 탭 3행부터 복사 → 이카운트 발주계획 웹자료올리기 양식 2행에 붙여넣기');
+    '\n\n[' + poName + '] 탭 3행부터 복사 → 이카운트 발주계획 웹자료올리기 양식 2행에 붙여넣기\n또는 "발주서 API 전송"으로 바로 전송');
 }
 
 // ══════════════════════════ 발주 API · 미입고 관리 ══════════════════════════
@@ -1394,8 +1405,8 @@ function sendPurchaseOrderApi() {
   var ui = SpreadsheetApp.getUi();
   var b;
   try { b = branchFromActive_(ss); } catch (e) { ui.alert(e.message); return; }
-  var po = ss.getSheetByName(CONFIG.PO_SHEET);
-  if (!po || po.getLastRow() < 3) { ui.alert('먼저 "발주서 양식 생성"으로 [_발주서]를 만드세요.'); return; }
+  var po = ss.getSheetByName(branchTab_(CONFIG.PO_SHEET, b)) || ss.getSheetByName(CONFIG.PO_SHEET);
+  if (!po || po.getLastRow() < 3) { ui.alert('먼저 "발주서 양식 생성"으로 [' + branchTab_(CONFIG.PO_SHEET, b) + ']를 만드세요.'); return; }
   var rows = po.getRange(3, 1, po.getLastRow() - 2, PO_HEADERS.length).getValues()
     .filter(function (r) { return String(r[10] || '').trim() && Number(r[15]) > 0; });
   if (!rows.length) { ui.alert('[_발주서]에 전송할 품목이 없습니다.'); return; }
@@ -1468,7 +1479,13 @@ function sendPurchaseOrderApi() {
     return [String(r[0]), slip, b.name, String(r[13] || ''), String(r[10]), String(r[11] || ''),
       Number(r[15]), 0, Number(r[15]), status, String(r[7] || ''), now];
   });
-  log.getRange(log.getLastRow() + 1, 1, outRows.length, ORDERLOG_HEADERS.length).setValues(outRows);
+  var logLock = LockService.getDocumentLock();
+  try { logLock.waitLock(15000); } catch (eLk) {}
+  try {
+    log.getRange(log.getLastRow() + 1, 1, outRows.length, ORDERLOG_HEADERS.length).setValues(outRows);
+  } finally {
+    try { logLock.releaseLock(); } catch (e2) {}
+  }
   ui.alert((mode === 'live' ? '✅ 발주서 전송 완료' : '🧪 테스트 전송 완료') + ' — 전표 ' + slips.join(', ') +
     '\n· [_발주이력]에 ' + outRows.length + '품목 기록 (미입고 잔량 추적)' +
     (mode === 'live'
@@ -2196,9 +2213,10 @@ function makeSlipPreview() {
     if (sentKeys[key]) { r[9] = '기전송(자동 제외)'; dup++; }
   });
 
-  var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
+  var prevName = branchTab_(CONFIG.PREVIEW_SHEET, b);
+  var sheet = ss.getSheetByName(prevName);
   if (sheet) { sheet.clear(); }
-  else sheet = ss.insertSheet(CONFIG.PREVIEW_SHEET, ss.getSheets().length);
+  else sheet = ss.insertSheet(prevName, ss.getSheets().length);
   sheet.getRange(1, 1).setValue('[' + b.name + '] 전송 전 검토용 — 수량 수정 가능, 빼려면 행 삭제 또는 수량 0. 검토 후 "③ 전표 전송" 실행' +
     (shortage.length ? '   ⚠ 창고재고 부족 ' + shortage.length + '건 (이동수량 제한 — 발주 필요)' : ''));
   sheet.getRange(1, 1).setFontWeight('bold').setFontColor(shortage.length ? '#a35a0c' : '#0e6f6a');
@@ -2221,7 +2239,7 @@ function makeSlipPreview() {
     (shortage.length ? '\n\n⚠ 창고재고 부족 ' + shortage.length + '건 — 부족분은 이동에서 제외됨 (발주수량에 반영):\n' + shortage.slice(0, 8).join('\n') + (shortage.length > 8 ? '\n…' : '') : '') +
     (negStock.length ? '\n\n🚨 전산 음수재고 ' + negStock.length + '건 — 과거 전표 오류 가능성, 이카운트에서 원인 확인·수정 필요:\n' + negStock.slice(0, 8).join('\n') + (negStock.length > 8 ? '\n…' : '') : '') +
     (overCount.length ? '\n\n⚠ 실사 > 전일재고 ' + overCount.length + '건 — 판매 전표 생략됨. 전산 누락(이동/입고/환입 미기입) 확인 후 이카운트에 소급 기입 필요:\n' + overCount.slice(0, 8).join('\n') + (overCount.length > 8 ? '\n…' : '') : '') +
-    '\n\n"' + CONFIG.PREVIEW_SHEET + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
+    '\n\n"' + prevName + '" 탭에서 검토·수정 후 "③ 전표 전송"을 실행하세요.');
 }
 
 // ══════════════════════════ ③ 전표 전송 ══════════════════════════
@@ -2229,8 +2247,16 @@ function makeSlipPreview() {
 function sendSlips() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
-  if (!sheet || sheet.getLastRow() < 3) { ui.alert('먼저 "② 마감 전표 미리보기"를 실행하세요.'); return; }
+  // 지점 판별: _전표전송_지점 탭에서 실행하면 그 탭, 재고_지점 탭에서 실행하면 해당 지점 탭
+  var act = ss.getActiveSheet().getName();
+  var sheet = null;
+  if (act.indexOf(CONFIG.PREVIEW_SHEET + '_') === 0) {
+    sheet = ss.getActiveSheet();
+  } else {
+    try { sheet = ss.getSheetByName(branchTab_(CONFIG.PREVIEW_SHEET, branchFromActive_(ss))); } catch (e) {}
+  }
+  if (!sheet) sheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);  // 구버전 호환
+  if (!sheet || sheet.getLastRow() < 3) { ui.alert('먼저 "② 마감 전표 미리보기"를 실행하세요.\n(해당 지점의 재고 탭 또는 _전표전송_지점명 탭을 연 상태에서 ③을 실행)'); return; }
 
   var lastRow = sheet.getLastRow();
   var rows = sheet.getRange(3, 1, lastRow - 2, 11).getValues();
@@ -2337,6 +2363,11 @@ function sendSlips() {
 function slipKey_(r) {
   return [r[0], r[1], r[2], r[3], r[4], r[5], r[7]].join('|');
 }
+
+/** 지점별 작업 탭 이름 — 담당자 동시 작업 지원 (_전표전송_부평점 등) */
+function branchTab_(base, b) {
+  return base + '_' + (b && b.name ? b.name : b);
+}
 /** 활성 지점의 전송이력(중복 방지 키) 초기화 — 이카운트에서 전표를 삭제하고 같은 수량으로 재전송할 때 사용 */
 function clearSentKeysForBranch() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2354,7 +2385,7 @@ function clearSentKeysForBranch() {
     '⚠ 초기화하면 ② 미리보기에서 "기전송" 표시가 사라지고 ③에서 같은 전표가 다시 전송됩니다.\n' +
     '이카운트에서 해당 전표를 이미 삭제한 경우에만 사용하세요. (중복 전표 위험)', ui.ButtonSet.YES_NO);
   if (go !== ui.Button.YES) return;
-  putSentKeys_(keys);
+  putSentKeys_(keys, true);  // 삭제 반영을 위해 통째 교체
   ui.alert('✅ [' + b.name + '] 전송이력 ' + removed + '건 초기화 완료.\n"② 마감 전표 미리보기"를 다시 실행하면 전 항목이 "대기"로 생성됩니다.');
 }
 
@@ -2362,10 +2393,22 @@ function getSentKeys_() {
   try { return JSON.parse(PropertiesService.getDocumentProperties().getProperty('SENT_KEYS') || '{}'); }
   catch (e) { return {}; }
 }
-function putSentKeys_(keys) {
-  var ks = Object.keys(keys);
-  if (ks.length > 3000) ks.slice(0, ks.length - 3000).forEach(function (k) { delete keys[k]; });
-  PropertiesService.getDocumentProperties().setProperty('SENT_KEYS', JSON.stringify(keys));
+/** 전송이력 저장. 기본은 병합(동시 작업 시 다른 담당자 키 유실 방지), replace=true면 통째로 교체(초기화용) */
+function putSentKeys_(keys, replace) {
+  var lock = LockService.getDocumentLock();
+  try { lock.waitLock(10000); } catch (eL) {}
+  try {
+    var out = keys;
+    if (!replace) {
+      out = getSentKeys_();
+      Object.keys(keys).forEach(function (k) { out[k] = keys[k]; });
+    }
+    var ks = Object.keys(out);
+    if (ks.length > 3000) ks.slice(0, ks.length - 3000).forEach(function (k) { delete out[k]; });
+    PropertiesService.getDocumentProperties().setProperty('SENT_KEYS', JSON.stringify(out));
+  } finally {
+    try { lock.releaseLock(); } catch (e2) {}
+  }
 }
 
 function relaySave_(kind, listKey, bulk, testMode) {
@@ -2411,7 +2454,7 @@ function checkInventory() {
   // 기대재고의 이동/환입은 시트 수식이 아니라 "실제 전송 성공한 전표" 기준 (_전표전송 탭 집계, 대표코드 합산)
   // — 수식(불출수량)은 창고재고가 갱신되면 값이 변해서 전송 시점 수량과 어긋날 수 있음
   var movedBy = {}, retBy = {};
-  var prevSheet = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
+  var prevSheet = ss.getSheetByName(branchTab_(CONFIG.PREVIEW_SHEET, b)) || ss.getSheetByName(CONFIG.PREVIEW_SHEET);
   if (prevSheet && prevSheet.getLastRow() > 2) {
     prevSheet.getRange(3, 1, prevSheet.getLastRow() - 2, 11).getValues().forEach(function (r) {
       if (String(r[0]) !== b.name) return;
@@ -2451,9 +2494,10 @@ function checkInventory() {
   main.getRange(startRow, COL.STORAGE, n, 1).setValues(storVals);
   main.getRange(startRow, COL.SURGERY, n, 1).setValues(surgVals);
 
-  var sheet = ss.getSheetByName(CONFIG.CHECK_SHEET);
+  var chkName = branchTab_(CONFIG.CHECK_SHEET, b);
+  var sheet = ss.getSheetByName(chkName);
   if (sheet) sheet.clearContents();
-  else sheet = ss.insertSheet(CONFIG.CHECK_SHEET, ss.getSheets().length);
+  else sheet = ss.insertSheet(chkName, ss.getSheets().length);
   sheet.getRange(1, 1).setValue('[' + b.name + '] 중앙공급실 재고 점검 (' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'MM/dd HH:mm') + ') — 기대재고 = 실사 + 창고→중앙 이동(전송된 전표) − 환입(전표)');
   sheet.getRange(2, 1, 1, 8).setValues([['품목코드', '품목명', '실사', '이동(전표)', '환입(전표)', '기대재고', 'ERP 실재고', '차이']]).setFontWeight('bold');
   if (report.length) sheet.getRange(3, 1, report.length, 8).setValues(report);
@@ -2461,7 +2505,7 @@ function checkInventory() {
   ss.setActiveSheet(sheet);
 
   ui.alert(report.length
-    ? '⚠ [' + b.name + '] 차이 품목 ' + report.length + '건 — "' + CONFIG.CHECK_SHEET + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
+    ? '⚠ [' + b.name + '] 차이 품목 ' + report.length + '건 — "' + chkName + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
     : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.');
 }
 
@@ -2492,9 +2536,9 @@ function saveDailyLog() {
     }
   }
 
-  // 오늘 전표번호 모음 (_전표전송 탭 K열)
+  // 오늘 전표번호 모음 (지점별 _전표전송 탭 K열)
   var slipNos = '';
-  var prev = ss.getSheetByName(CONFIG.PREVIEW_SHEET);
+  var prev = ss.getSheetByName(branchTab_(CONFIG.PREVIEW_SHEET, b)) || ss.getSheetByName(CONFIG.PREVIEW_SHEET);
   if (prev && prev.getLastRow() > 2) {
     var uniq = {};
     prev.getRange(3, 11, prev.getLastRow() - 2, 1).getValues().forEach(function (r) {
