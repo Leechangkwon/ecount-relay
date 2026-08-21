@@ -1310,13 +1310,18 @@ function buildPurchaseOrderSheet() {
     if (!code || !(qty > 0)) return;
     var it = info[code] || {};
     var vendor = it.vendor || String(r[COL.VENDOR - 1] || '').trim();
-    var price = it.price || 0;
-    var supply = Math.round(qty * price);
+    // 품목정보 입고단가 = VAT 포함 단가 → 공급가액/부가세는 역산 (합계 = 수량 × 포함단가)
+    var priceVat = it.price || 0;
+    var total = Math.round(qty * priceVat);
+    var supply = Math.round(total / (1 + CONFIG.VAT_RATE));
+    var vat = total - supply;
+    var priceEx = qty > 0 ? Math.round(supply / qty) : 0;
     lines.push({ vendor: vendor, row: [
       ymd, '', b.emp, whCd, CONFIG.PO_TRADE_TYPE, '', '', due, '', '',
       code, it.name || String(r[COL.NAME - 1] || ''), '', vendor, it.size || '',
-      qty, price, '', supply, Math.round(supply * CONFIG.VAT_RATE), '[' + b.name + '] 자동발주 ' + Utilities.formatDate(today, 'Asia/Seoul', 'M/d'), '',
-      qty  // 박스단위(박스수량): 기본 = 낱개수량. 박스 입수가 다른 품목은 [_발주서]에서 이 열만 수정
+      qty, priceEx, '', supply, vat, '[' + b.name + '] 자동발주 ' + Utilities.formatDate(today, 'Asia/Seoul', 'M/d'),
+      priceVat,  // 단가(vat포함)
+      qty        // 박스단위(박스수량): 기본 = 낱개수량. 박스 입수가 다른 품목은 [_발주서]에서 이 열만 수정
     ]});
   });
   if (!lines.length) { ui.alert('[' + b.name + '] 발주수량이 0보다 큰 품목이 없습니다.'); return; }
@@ -1457,6 +1462,7 @@ function sendPurchaseOrderApi() {
       PROD_CD: String(r[10]), QTY: String(Number(r[15])),
       UQTY: String(Number(r[22]) || Number(r[15]) || 0),  // 박스수량(화면 '박스수량' = API 추가수량) — 발주서 '박스단위' 열, 기본 낱개수량과 동일
       PRICE: String(Number(r[16]) || 0), SUPPLY_AMT: String(Number(r[18]) || 0), VAT_AMT: String(Number(r[19]) || 0),
+      USER_PRICE_VAT: String(Number(r[21]) || 0),  // 단가(vat포함) — 품목정보 입고단가는 VAT 포함가
       P_AMT1: '0',  // 회사 발주서 양식에 '금액1'이 필수로 설정돼 있음 (2026-08-20 테스트 전송으로 확인)
       REMARKS: String(r[20] || '')
     };
@@ -1582,12 +1588,17 @@ function sendPurchaseReceipts() {
   function serOf(cust) { var k = cust || '_'; if (!serByCust[k]) serByCust[k] = String(++serial); return serByCust[k]; }
   var all = lines.concat(unlinked.map(function (u) { return { code: u.code, name: u.name, qty: u.qty, ordDate: '', ordNo: '', cust: u.cust }; }));
   var bulk = all.map(function (l) {
-    var price = (itemInfo[l.code] || {}).price || 0;
-    var supply = Math.round(l.qty * price);
+    // 품목정보 입고단가 = VAT 포함 단가 → 공급가액/부가세 역산 (발주서와 동일 규칙)
+    var priceVat = (itemInfo[l.code] || {}).price || 0;
+    var total = Math.round(l.qty * priceVat);
+    var supply = Math.round(total / (1 + CONFIG.VAT_RATE));
+    var vat = total - supply;
     var row = {
       IO_DATE: ymd, UPLOAD_SER_NO: serOf(l.cust), EMP_CD: b.emp, WH_CD: whCd,
       CUST_DES: l.cust || '', PROD_CD: l.code, QTY: String(l.qty),
-      PRICE: String(price), SUPPLY_AMT: String(supply), VAT_AMT: String(Math.round(supply * CONFIG.VAT_RATE))
+      PRICE: String(l.qty > 0 ? Math.round(supply / l.qty) : 0),
+      SUPPLY_AMT: String(supply), VAT_AMT: String(vat),
+      USER_PRICE_VAT: String(priceVat)
     };
     if (l.ordDate && l.ordNo) { row.ORD_DATE = l.ordDate; row.ORD_NO = l.ordNo; }
     return row;
