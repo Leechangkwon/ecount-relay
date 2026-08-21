@@ -397,7 +397,7 @@ function buildGuideSheet() {
   add('일별기록', '감사 로그', '⑤ 마감 저장 시 하루 한 번 전 품목 스냅샷. 일자·지점·품목으로 필터해 과거 확인', 'line');
   add('설정', '지점 설정', '지점명·판매거래처코드·담당자코드·창고 3개(드롭다운). 지점 추가는 행 추가', 'line');
   add('품목 정보', '품목 마스터', '품목명·규격·단가·분류 참조', 'line');
-  add('_전표전송_지점명 / _재고점검_지점명 / _발주서_지점명 / _실사리스트_지점명', '지점별 작업 결과', '②③④⑩ 실행 결과 — 지점별 탭이라 담당자들이 동시에 작업 가능. 실행할 때마다 덮어씀', 'line');
+  add('_전표전송_지점명 / _재고점검_지점명 / _발주서_지점명 / _실사리스트_지점명', '지점별 작업 탭 (일회성)', '②③④⑩ 실행 중에만 존재 — 담당자들이 동시에 작업 가능. 흐름이 끝나면 자동 삭제: 발주서는 API 전송 성공 시, 실사 리스트는 재고 탭 반영 시, 전표전송·재고점검은 ⑤ 마감 저장 시', 'line');
   add('_발주이력', '발주 원장 (전 지점 공용)', '발주서 API 전송 시 자동 기록, 지점 열로 구분. 미입고 잔량 추적의 기준', 'line');
   add('_창고목록 / _API디버그', '숨김', '창고 드롭다운 소스 / API 원본 응답(오류 원인 확인용, 최근 30건)', 'line');
   gap();
@@ -1235,7 +1235,13 @@ function applyCountSheet() {
     applied++;
   });
   ss.setActiveSheet(main);
+  // 반영 완료 → 실사 리스트 작업 탭 삭제 (불일치가 있으면 재확인용으로 유지)
+  var listDeleted = false;
+  if (!mismatch.length) {
+    try { ss.deleteSheet(sheet); listDeleted = true; } catch (eDel) {}
+  }
   ui.alert('✅ [' + bm[1] + '] 실사값 ' + applied + '건을 재고 탭 G열에 반영했습니다.' +
+    (listDeleted ? '\n· 실사 리스트 탭은 반영 완료되어 삭제했습니다.' : '') +
     (mismatch.length ? '\n⚠ 행 불일치로 건너뜀 ' + mismatch.length + '건 (재고 탭이 바뀐 뒤 리스트를 다시 생성하세요): ' + mismatch.slice(0, 10).join(', ') : '') +
     '\n\n이어서 ② 마감 전표 미리보기를 실행하세요.');
 }
@@ -1486,8 +1492,14 @@ function sendPurchaseOrderApi() {
   } finally {
     try { logLock.releaseLock(); } catch (e2) {}
   }
+  // 흐름 완료(전송 성공 + 원장 기록) → 발주서 작업 탭 삭제. 일부 실패 시엔 재시도용으로 유지
+  var poDeleted = false;
+  if (failCnt === 0) {
+    try { ss.deleteSheet(po); poDeleted = true; } catch (eDel) {}
+  }
   ui.alert((mode === 'live' ? '✅ 발주서 전송 완료' : '🧪 테스트 전송 완료') + ' — 전표 ' + slips.join(', ') +
     '\n· [_발주이력]에 ' + outRows.length + '품목 기록 (미입고 잔량 추적)' +
+    (poDeleted ? '\n· 발주서 작업 탭은 전송 완료되어 삭제했습니다.' : '') +
     (mode === 'live'
       ? '\n· ① 아침 준비/발주서 생성 시 V열(미입고)에 반영되어 다음 발주에서 자동 차감됩니다.'
       : '\n\n⚠ 테스트 모드: 검증이 끝나면 이카운트에서 전표를 삭제하고, [_발주이력]의 "진행(테스트)" 행도 삭제하세요.\n검증 통과 후 "발주 API 모드 전환"으로 실서버 전환.'));
@@ -2504,9 +2516,10 @@ function checkInventory() {
   sheet.showSheet();
   ss.setActiveSheet(sheet);
 
-  ui.alert(report.length
+  ui.alert((report.length
     ? '⚠ [' + b.name + '] 차이 품목 ' + report.length + '건 — "' + chkName + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
-    : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.');
+    : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.') +
+    (!prevSheet ? '\n\n(참고: 전표전송 탭이 없어 이동·환입 전표 없이 비교했습니다 — ⑤ 마감 저장 이후라면 차이가 과대 표시될 수 있습니다)' : ''));
 }
 
 // ══════════════════════════ ⑤ 마감 저장 ══════════════════════════
@@ -2565,7 +2578,15 @@ function saveDailyLog() {
   if (!out.length) { ui.alert('저장할 데이터가 없습니다.'); return; }
   log.getRange(log.getLastRow() + 1, 1, out.length, LOG_HEADERS.length).setValues(out);
 
+  // 마감 완료 → 지점 작업 탭 정리 (전표번호·전표 집계는 이미 일별기록/원장에 반영됨)
+  var cleaned = [];
+  [branchTab_(CONFIG.PREVIEW_SHEET, b), branchTab_(CONFIG.CHECK_SHEET, b), branchTab_(CONFIG.COUNT_SHEET, b)].forEach(function (nm) {
+    var s2 = ss.getSheetByName(nm);
+    if (s2) { try { ss.deleteSheet(s2); cleaned.push(nm); } catch (eDel) {} }
+  });
+
   ui.alert('✅ [' + b.name + '] 마감 저장 완료 — [일별기록]에 ' + out.length + '건 기록 (' + ymd + ')\n' +
+    (cleaned.length ? '· 작업 탭 정리: ' + cleaned.join(', ') + '\n' : '') +
     '과거 이력은 [일별기록] 탭에서 일자/지점/품목으로 필터해 확인하세요.');
 }
 
