@@ -1401,7 +1401,7 @@ function sendPurchaseOrderApi() {
   var vendors = {};
   rows.forEach(function (r) { vendors[String(r[13] || '(구매처 없음)')] = 1; });
   var go = ui.alert('발주서 ' + rows.length + '품목 / 거래처 ' + Object.keys(vendors).length + '건을 이카운트로 전송합니다.\n' +
-    '모드: ' + (mode === 'test' ? '🧪 테스트 (sboapi + 테스트키)\n⚠ 테스트 모드도 실제 데이터에 발주 전표가 생성됩니다 — 검증 후 이카운트에서 삭제하세요. 발주이력(미입고)에는 기록하지 않습니다.' : '✅ 실서버') +
+    '모드: ' + (mode === 'test' ? '🧪 테스트 (sboapi + 테스트키)\n⚠ 테스트 모드도 실제 데이터에 발주 전표가 생성됩니다 — 검증 후 이카운트 전표와 [_발주이력]의 "진행(테스트)" 행을 삭제하세요.' : '✅ 실서버') +
     '\n\n진행할까요?', ui.ButtonSet.YES_NO);
   if (go !== ui.Button.YES) return;
 
