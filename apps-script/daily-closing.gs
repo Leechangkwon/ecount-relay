@@ -1400,7 +1400,25 @@ function sendPurchaseOrderApi() {
   var mode = poApiMode_();
   var vendors = {};
   rows.forEach(function (r) { vendors[String(r[13] || '(구매처 없음)')] = 1; });
-  var go = ui.alert('발주서 ' + rows.length + '품목 / 거래처 ' + Object.keys(vendors).length + '건을 이카운트로 전송합니다.\n' +
+
+  // 오래된 발주서 전송 방지: 생성일이 오늘이 아니거나 재고 탭 현재 산출과 품목 수가 다르면 경고
+  var staleWarn = '';
+  var ymdChk = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd');
+  var poTitle = String(po.getRange(1, 1).getValue());
+  var nMain = b.sheet.getLastRow() - CONFIG.DATA_START_ROW + 1;
+  var curCnt = 0;
+  if (nMain > 0) {
+    b.sheet.getRange(CONFIG.DATA_START_ROW, 1, nMain, N_COLS).getValues().forEach(function (r) {
+      if (String(r[COL.CODE - 1] || '').trim() && Number(r[COL.ORDER - 1]) > 0) curCnt++;
+    });
+  }
+  if (poTitle.indexOf(ymdChk) < 0) {
+    staleWarn = '\n\n🚨 이 발주서는 오늘 생성된 것이 아닙니다 (이전 발주서가 그대로 전송됩니다)!\n먼저 "발주서 양식 생성"을 실행한 뒤 전송하세요.';
+  } else if (curCnt !== rows.length) {
+    staleWarn = '\n\n⚠ 재고 탭의 현재 발주수량>0 품목은 ' + curCnt + '건인데 발주서는 ' + rows.length + '건입니다.\n발주서 생성 이후 재고가 바뀌었다면 "발주서 양식 생성"을 다시 실행하세요.';
+  }
+
+  var go = ui.alert('발주서 ' + rows.length + '품목 / 거래처 ' + Object.keys(vendors).length + '건을 이카운트로 전송합니다.' + staleWarn + '\n' +
     '모드: ' + (mode === 'test' ? '🧪 테스트 (sboapi + 테스트키)\n⚠ 테스트 모드도 실제 데이터에 발주 전표가 생성됩니다 — 검증 후 이카운트 전표와 [_발주이력]의 "진행(테스트)" 행을 삭제하세요.' : '✅ 실서버') +
     '\n\n진행할까요?', ui.ButtonSet.YES_NO);
   if (go !== ui.Button.YES) return;
