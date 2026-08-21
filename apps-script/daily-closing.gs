@@ -2162,6 +2162,21 @@ function makeSlipPreview() {
   });
   entries.sort(countCompare_);
 
+  // ── 증분 전표: 오늘 이미 전송한 수량을 대표코드 기준으로 집계해 차감하고 잔여분만 생성 ──
+  // ③ 전송 후 ②를 재실행하면 전표 반영으로 API 재고가 바뀌어 분배·캡이 달라지는데,
+  // 키 단위 기전송 필터로는 못 걸러 이중 전표 위험 → 총량에서 기전송분을 빼는 방식으로 해결
+  var sentAgg = {};
+  Object.keys(getSentKeys_()).forEach(function (k) {
+    var p = k.split('|');
+    if (p.length < 7 || p[0] !== b.name) return;   // 구매입고 키(5조각) 등은 제외
+    var rep = repCode_(map, p[5]);
+    var kk = [p[1], p[2], p[3], p[4], rep].join('|');
+    sentAgg[kk] = (sentAgg[kk] || 0) + (Number(p[6]) || 0);
+  });
+  function sentQty(type, date, whF, whT, rep) {
+    return sentAgg[[type, date, whF, whT, rep].join('|')] || 0;
+  }
+
   var secSale = [], secCS = [], secWC = [], secRet = [], secFail = [], shortage = [], overCount = [];
   entries.forEach(function (e) {
     var fb = { code: e.code, name: e.name };
@@ -2169,26 +2184,32 @@ function makeSlipPreview() {
     // 페일 픽스쳐: 재고가 없다가 실사로 생기는 품목 (식립 실패 반품분).
     // 실사 N → 판매 −N(수술방, 전일자: 사용 실적 차감 + 수술방 재고 생성) → 수술방→창고 이동 +N(오늘자: 반품 대기 보관)
     if (isFail && e.sale < 0) {
-      var fq = -e.sale;
+      var fSent = sentQty('판매', ymdPrev, b.whSurgery, '', e.code);       // 이미 보낸 음수 판매 합
+      var fRemain = e.sale - fSent;                                         // 남은 차감분 (음수)
+      var fMvSent = sentQty('이동', ymdToday, b.whSurgery, b.whStorage, e.code);
+      var fMvRemain = (-e.sale) - fMvSent;
       var fPrice = (itemInfo[e.code] || {}).price || 0;
-      secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', e.code, e.name + ' (페일 차감)', e.sale, fPrice, '대기', '']);
-      secFail.push([b.name, '이동', ymdToday, b.whSurgery, b.whStorage, e.code, e.name + ' (페일 보관)', fq, '', '대기', '']);
+      if (fRemain < 0) secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', e.code, e.name + ' (페일 차감)', fRemain, fPrice, '대기', '']);
+      if (fMvRemain > 0) secFail.push([b.name, '이동', ymdToday, b.whSurgery, b.whStorage, e.code, e.name + ' (페일 보관)', fMvRemain, '', '대기', '']);
       return;
     }
     if (e.sale < 0) overCount.push(e.code + ' ' + e.name.slice(0, 12) + ': 실사가 전일재고보다 ' + (-e.sale) + ' 많음');
-    if (e.sale > 0) {
+    var saleRemain = Math.max(0, e.sale - sentQty('판매', ymdPrev, b.whSurgery, '', e.code));
+    var csRemain = Math.max(0, e.sale - sentQty('이동', ymdPrev, b.whCentral, b.whSurgery, e.code));
+    if (e.sale > 0 && (saleRemain > 0 || csRemain > 0)) {
       // 이동(중앙→수술방)을 중앙 재고 기준으로 먼저 분배하고,
       // 판매(수술방 출고)는 "수술방 재고 + 오늘 이동 유입분" 기준으로 분배해 코드 구성을 일치시킨다
-      // — 두 분배가 어긋나면 수술방에 코드별 음수 재고가 생김 (수술방 무재고 품목, 음수재고 품목 케이스)
-      var mvParts = split(e.code, e.sale, 0);
-      var saleParts;
-      if (hasMap && map.siblings[e.code]) {
-        var availS = {};
-        mvParts.forEach(function (p) { availS[p.code] = (availS[p.code] || 0) + p.qty; });
-        Object.keys(raw).forEach(function (c) { availS[c] = (availS[c] || 0) + Math.max(0, raw[c][2]); });
-        saleParts = splitQtyFifo_(map, e.code, e.sale, availS);
-      } else {
-        saleParts = [{ code: e.code, qty: e.sale }];
+      var mvParts = csRemain > 0 ? split(e.code, csRemain, 0) : [];
+      var saleParts = [];
+      if (saleRemain > 0) {
+        if (hasMap && map.siblings[e.code]) {
+          var availS = {};
+          mvParts.forEach(function (p) { availS[p.code] = (availS[p.code] || 0) + p.qty; });
+          Object.keys(raw).forEach(function (c) { availS[c] = (availS[c] || 0) + Math.max(0, raw[c][2]); });
+          saleParts = splitQtyFifo_(map, e.code, saleRemain, availS);
+        } else {
+          saleParts = [{ code: e.code, qty: saleRemain }];
+        }
       }
       saleParts.forEach(function (p) {
         secSale.push([b.name, '판매', ymdPrev, b.whSurgery, '', p.code, nameOf(p.code, fb), p.qty, (itemInfo[p.code] || itemInfo[e.code] || {}).price || 0, '대기', '']);
@@ -2198,21 +2219,26 @@ function makeSlipPreview() {
       });
     }
     if (e.need > 0) {
-      // 창고 실재고를 넘는 수량은 이동 불가 → 이동수량 = MIN(부족수량, 창고재고). 못 채운 만큼은 경고(발주로 커버)
-      var mv = Math.min(e.need, Math.max(0, e.whStock));
-      var short = e.need - mv;
-      if (short > 0) shortage.push(e.code + ' ' + e.name.slice(0, 12) + ': 필요 ' + e.need + ' 중 ' + mv + '만 이동 (창고재고 ' + e.whStock + ')');
+      // 기전송 보충분 차감 후 잔여 부족분만, 창고 실재고 한도 내에서 이동
+      var wcSent = sentQty('이동', ymdToday, b.whStorage, b.whCentral, e.code);
+      var remainNeed = Math.max(0, e.need - wcSent);
+      var mv = Math.min(remainNeed, Math.max(0, e.whStock));
+      var short = remainNeed - mv;
+      if (short > 0) shortage.push(e.code + ' ' + e.name.slice(0, 12) + ': 필요 ' + remainNeed + ' 중 ' + mv + '만 이동 (창고재고 ' + e.whStock + ')');
       if (mv > 0) split(e.code, mv, 1).forEach(function (p) {
         secWC.push([b.name, '이동', ymdToday, b.whStorage, b.whCentral, p.code, nameOf(p.code, fb) + (short > 0 ? ' ⚠창고부족' : ''), p.qty, '', '대기', '']);
       });
     }
-    if (e.ret > 0) split(e.code, e.ret, 0).forEach(function (p) {
-      secRet.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
-    });
+    if (e.ret > 0) {
+      var retRemain = Math.max(0, e.ret - sentQty('환입', ymdToday, b.whCentral, b.whStorage, e.code));
+      if (retRemain > 0) split(e.code, retRemain, 0).forEach(function (p) {
+        secRet.push([b.name, '환입', ymdToday, b.whCentral, b.whStorage, p.code, nameOf(p.code, fb), p.qty, '', '대기', '']);
+      });
+    }
   });
 
   if (!secSale.length && !secCS.length && !secWC.length && !secFail.length && !secRet.length) {
-    ui.alert('전송할 내역이 없습니다. (실사값 입력 후 실행하세요)'); return;
+    ui.alert('전송할 신규 내역이 없습니다.\n(실사값 미입력이거나, 오늘 계산분이 이미 모두 전송된 상태 — 실사·환입 등을 추가 입력하면 그 잔여분만 생성됩니다)'); return;
   }
 
   // 섹션 조립: 밴드 행(코드·수량 없음 → 전송에서 자동 제외)
@@ -2476,25 +2502,19 @@ function checkInventory() {
   var n = main.getLastRow() - startRow + 1;
   var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
-  // 기대재고의 이동/환입은 시트 수식이 아니라 "실제 전송 성공한 전표" 기준 (_전표전송 탭 집계, 대표코드 합산)
-  // — 수식(불출수량)은 창고재고가 갱신되면 값이 변해서 전송 시점 수량과 어긋날 수 있음
+  // 기대재고의 이동/환입은 "오늘 실제 전송 성공한 수량" 기준 — 전송이력(SENT_KEYS) 집계 (대표코드 합산)
+  // 작업 탭은 증분 재생성·마감 시 삭제되므로 탭이 아닌 전송이력에서 읽어야 항상 정확하다
   var movedBy = {}, retBy = {};
-  var prevSheet = ss.getSheetByName(branchTab_(CONFIG.PREVIEW_SHEET, b)) || ss.getSheetByName(CONFIG.PREVIEW_SHEET);
-  if (prevSheet && prevSheet.getLastRow() > 2) {
-    prevSheet.getRange(3, 1, prevSheet.getLastRow() - 2, 11).getValues().forEach(function (r) {
-      if (String(r[0]) !== b.name) return;
-      var st = String(r[9] || '');
-      if (st.indexOf('전송완료') !== 0 && st.indexOf('기전송') !== 0) return;
-      var cd = String(r[5] || '').trim();
-      if (!cd) return;
-      var rep = repCode_(mapC, cd);
-      var qty = Number(r[7]) || 0;
-      if (r[1] === '이동' && String(r[3]).trim() === String(b.whStorage).trim() && String(r[4]).trim() === String(b.whCentral).trim()) {
-        movedBy[rep] = (movedBy[rep] || 0) + qty;
-      }
-      if (r[1] === '환입') retBy[rep] = (retBy[rep] || 0) + qty;
-    });
-  }
+  Object.keys(getSentKeys_()).forEach(function (k) {
+    var p = k.split('|');
+    if (p.length < 7 || p[0] !== b.name || p[2] !== ymd) return;
+    var rep = repCode_(mapC, p[5]);
+    var q = Number(p[6]) || 0;
+    if (p[1] === '이동' && String(p[3]).trim() === String(b.whStorage).trim() && String(p[4]).trim() === String(b.whCentral).trim()) {
+      movedBy[rep] = (movedBy[rep] || 0) + q;
+    }
+    if (p[1] === '환입') retBy[rep] = (retBy[rep] || 0) + q;
+  });
 
   var report = [];
   var storVals = [], surgVals = [];
@@ -2531,10 +2551,9 @@ function checkInventory() {
   sheet.showSheet();
   ss.setActiveSheet(sheet);
 
-  ui.alert((report.length
+  ui.alert(report.length
     ? '⚠ [' + b.name + '] 차이 품목 ' + report.length + '건 — "' + chkName + '" 탭을 확인하세요.\n(전표 미전송/수량 차이/타 창고 이동 여부 확인)'
-    : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.') +
-    (!prevSheet ? '\n\n(참고: 전표전송 탭이 없어 이동·환입 전표 없이 비교했습니다 — ⑤ 마감 저장 이후라면 차이가 과대 표시될 수 있습니다)' : ''));
+    : '✅ [' + b.name + '] 점검 완료 — 실사한 품목의 중앙 재고가 이카운트와 모두 일치합니다.');
 }
 
 // ══════════════════════════ ⑤ 마감 저장 ══════════════════════════
