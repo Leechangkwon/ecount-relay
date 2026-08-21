@@ -2237,7 +2237,11 @@ function makeSlipPreview() {
     }
   });
 
-  if (!secSale.length && !secCS.length && !secWC.length && !secFail.length && !secRet.length) {
+  var hasSentToday = Object.keys(sentAgg).some(function (kk) {
+    var p = kk.split('|');
+    return sentAgg[kk] && (p[1] === ymdPrev || p[1] === ymdToday);
+  });
+  if (!secSale.length && !secCS.length && !secWC.length && !secFail.length && !secRet.length && !hasSentToday) {
     ui.alert('전송할 신규 내역이 없습니다.\n(실사값 미입력이거나, 오늘 계산분이 이미 모두 전송된 상태 — 실사·환입 등을 추가 입력하면 그 잔여분만 생성됩니다)'); return;
   }
 
@@ -2255,10 +2259,25 @@ function makeSlipPreview() {
   addSection('이동 — 수술방 → 창고 (페일 보관, ' + ymdToday + ')', secFail);
   addSection('환입 — 중앙공급실 → 창고 (' + ymdToday + ')', secRet);
 
-  // 이미 전송된 키(중복 방지)
+  // 참고 섹션: 오늘 기전송 누적 — 재고 탭 총량(판매 H 등)과 대조용. 상태가 '대기'가 아니므로 ③ 전송 대상 아님
+  var nameByCode = {};
+  entries.forEach(function (e) { nameByCode[e.code] = e.name; });
+  var sentRows = [];
+  Object.keys(sentAgg).forEach(function (kk) {
+    var q = sentAgg[kk];
+    if (!q) return;
+    var p = kk.split('|');  // 유형|일자|whF|whT|대표코드
+    if (p[1] !== ymdPrev && p[1] !== ymdToday) return;  // 오늘 사이클 분만
+    sentRows.push([b.name, p[0], p[1], p[2], p[3], p[4], nameByCode[p[4]] || '', q, '', '기전송(오늘 누적)', '']);
+  });
+  sentRows.sort(function (a, c) { return (a[1] + '|' + a[5]) < (c[1] + '|' + c[5]) ? -1 : 1; });
+  addSection('오늘 기전송 누적 — 참고용 (재고 탭 총량 = 기전송 + 위의 대기)', sentRows);
+
+  // 이미 전송된 키(중복 방지) — '대기' 행만 검사 (참고 섹션은 제외)
   var sentKeys = getSentKeys_();
   var dup = 0;
   out.forEach(function (r) {
+    if (String(r[9]) !== '대기') return;
     var key = slipKey_(r);
     if (sentKeys[key]) { r[9] = '기전송(자동 제외)'; dup++; }
   });
@@ -2273,6 +2292,11 @@ function makeSlipPreview() {
   sheet.getRange(2, 1, 1, 11).setValues([['지점', '구분', '일자', '보내는창고/판매창고', '받는창고', '품목코드', '품목명', '수량', '단가(판매만)', '상태', '전표결과']])
     .setFontWeight('bold').setBackground('#0e6f6a').setFontColor('#ffffff');
   sheet.getRange(3, 1, out.length, 11).setValues(out).setFontSize(10);
+  // 참고 섹션(기전송 누적) 행은 회색으로 — 전송 대상이 아님을 시각적으로 구분
+  sheet.getRange(3, 1, out.length, 11).setFontColors(out.map(function (r) {
+    var c = String(r[9]) === '기전송(오늘 누적)' ? '#9aa5ad' : '#17232b';
+    var row = []; for (var ci = 0; ci < 11; ci++) row.push(c); return row;
+  }));
   sheet.setFrozenRows(2);
   bandIdx.forEach(function (r) {
     sheet.getRange(2 + r, 1, 1, 11).setBackground('#e2f1ef').setFontColor('#0e6f6a').setFontWeight('bold');
@@ -2285,6 +2309,7 @@ function makeSlipPreview() {
   var cnt = { '판매': 0, '이동': 0, '환입': 0 };
   out.forEach(function (r) { if (r[9] === '대기') cnt[r[1]]++; });
   ui.alert('[' + b.name + '] 전표 초안 생성 완료 — 판매 ' + cnt['판매'] + '건, 이동 ' + cnt['이동'] + '건, 환입 ' + cnt['환입'] + '건' +
+    (sentRows.length ? '\n(오늘 기전송 누적 ' + sentRows.length + '건은 하단 회색 참고 섹션에 표시 — 재고 탭 총량 = 기전송 + 대기)' : '') +
     (dup ? '\n(기전송 ' + dup + '건 자동 제외)' : '') +
     (shortage.length ? '\n\n⚠ 창고재고 부족 ' + shortage.length + '건 — 부족분은 이동에서 제외됨 (발주수량에 반영):\n' + shortage.slice(0, 8).join('\n') + (shortage.length > 8 ? '\n…' : '') : '') +
     (negStock.length ? '\n\n🚨 전산 음수재고 ' + negStock.length + '건 — 과거 전표 오류 가능성, 이카운트에서 원인 확인·수정 필요:\n' + negStock.slice(0, 8).join('\n') + (negStock.length > 8 ? '\n…' : '') : '') +
