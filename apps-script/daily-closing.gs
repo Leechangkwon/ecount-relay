@@ -1254,6 +1254,19 @@ function buildPurchaseOrderSheet() {
   var startRow = CONFIG.DATA_START_ROW;
   var n = main.getLastRow() - startRow + 1;
   if (n <= 0) { ui.alert('품목이 없습니다.'); return; }
+
+  // 발주 산출 직전에 미입고(V)를 원장 최신값으로 갱신 — 발주수량 수식이 즉시 차감 반영
+  try {
+    var mapBo = loadCodeMap_(ss);
+    var backo = backorderByCode_(ss, b.name, mapBo);
+    var codesBo = main.getRange(startRow, COL.CODE, n, 1).getValues();
+    main.getRange(startRow, COL.BACKORDER, n, 1).setValues(codesBo.map(function (row) {
+      var cd = String(row[0] || '').trim();
+      return [cd && backo[cd] ? backo[cd] : ''];
+    }));
+    SpreadsheetApp.flush();
+  } catch (eBo) { /* 원장 없으면 무시 */ }
+
   var data = main.getRange(startRow, 1, n, N_COLS).getValues();
 
   // 품목 정보: 코드 → {구매처, 규격, 단가, 품목명}
@@ -1422,22 +1435,23 @@ function sendPurchaseOrderApi() {
     if (!slips.length) return;
   }
 
-  if (mode === 'live') {
-    // 전표묶음 순서 = 순번 첫 등장 순서 → SlipNos 매칭
-    var slipBySer = {};
-    serOrder.forEach(function (ser, i) { slipBySer[ser] = slips[i] || '?'; });
-    var log = ensureOrderLog_(ss);
-    var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
-    var outRows = rows.map(function (r) {
-      var slip = slipBySer[String(r[1] || '1')] || '?';
-      return [String(r[0]), slip, b.name, String(r[13] || ''), String(r[10]), String(r[11] || ''),
-        Number(r[15]), 0, Number(r[15]), '진행', String(r[7] || ''), now];
-    });
-    log.getRange(log.getLastRow() + 1, 1, outRows.length, ORDERLOG_HEADERS.length).setValues(outRows);
-    ui.alert('✅ 발주서 전송 완료 — 전표 ' + slips.join(', ') + '\n· [_발주이력]에 ' + outRows.length + '품목 기록 (미입고 잔량 추적 시작)\n· ① 아침 준비 시 재고 탭 V열(미입고)에 반영되어 다음 발주에서 자동 차감됩니다.');
-  } else {
-    ui.alert('🧪 테스트 전송 완료 — 전표 ' + slips.join(', ') + '\n이카운트에서 전표 내용 확인 후 삭제하고, 이카운트에 API 검증을 요청하세요.\n검증 통과 후 "발주 API 모드 전환"으로 실서버로 바꾸면 됩니다.');
-  }
+  // 전표묶음 순서 = 순번 첫 등장 순서 → SlipNos 매칭. 테스트 모드도 원장에 기록(상태로 구분)해 미입고 사이클을 검증할 수 있게 한다
+  var slipBySer = {};
+  serOrder.forEach(function (ser, i) { slipBySer[ser] = slips[i] || '?'; });
+  var log = ensureOrderLog_(ss);
+  var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+  var status = mode === 'live' ? '진행' : '진행(테스트)';
+  var outRows = rows.map(function (r) {
+    var slip = slipBySer[String(r[1] || '1')] || '?';
+    return [String(r[0]), slip, b.name, String(r[13] || ''), String(r[10]), String(r[11] || ''),
+      Number(r[15]), 0, Number(r[15]), status, String(r[7] || ''), now];
+  });
+  log.getRange(log.getLastRow() + 1, 1, outRows.length, ORDERLOG_HEADERS.length).setValues(outRows);
+  ui.alert((mode === 'live' ? '✅ 발주서 전송 완료' : '🧪 테스트 전송 완료') + ' — 전표 ' + slips.join(', ') +
+    '\n· [_발주이력]에 ' + outRows.length + '품목 기록 (미입고 잔량 추적)' +
+    (mode === 'live'
+      ? '\n· ① 아침 준비/발주서 생성 시 V열(미입고)에 반영되어 다음 발주에서 자동 차감됩니다.'
+      : '\n\n⚠ 테스트 모드: 검증이 끝나면 이카운트에서 전표를 삭제하고, [_발주이력]의 "진행(테스트)" 행도 삭제하세요.\n검증 통과 후 "발주 API 모드 전환"으로 실서버 전환.'));
 }
 
 /** ⑩ 입고 전표 전송: 재고탭 N열(구매입고) 입력값을 구매입력 전표로 전송 — [_발주이력] 미입고 발주에 오래된 순으로 자동 연결 */
@@ -1466,7 +1480,7 @@ function sendPurchaseReceipts() {
     var cd = String(r[COL.CODE - 1] || '').trim();
     var qty = Number(r[COL.PURCHASE - 1]);
     if (!cd || !(qty > 0)) return;
-    var key = ['구매', b.name, ymd, cd, qty].join('|');
+    var key = [b.name, '구매', ymd, cd, qty].join('|');  // 지점 접두 — "전송이력 초기화"로 삭제 가능
     if (sentKeys[key]) { skipped++; return; }
     wants.push({ code: cd, name: String(r[COL.NAME - 1] || ''), qty: qty, key: key });
   });
